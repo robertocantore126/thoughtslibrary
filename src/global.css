@@ -1,0 +1,23 @@
+:root {
+    --ui-bg: #000000;
+    --blue-bg: #0F9B8E;
+    --text-color: #ffffff;
+    --accent: #ff7f50;
+    --input-bg: #cccccc;
+
+    color-scheme: dark;
+}
+
+.dnd-container {
+    height: 130px;
+    width: 130px;
+    position: fixed;
+    left: 10000px;
+}
+
+.dnd-img {
+    height: 100%;
+    width: 100%;
+    object-fit: contain;
+    filter: opacity(0.9);
+}

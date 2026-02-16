@@ -1,0 +1,26 @@
+January 24, 2025:
+
+This update addresses some feedback about the mobile UI in yesterday's update.
+
+* Added the ability to collapse the bottom pane using a new button on the righthand side of the tab bar. When the pane is collapsed, tapping on a tab will also expand the pane.
+* Set the bottom pane to be collapsed by default so you can see your entire chart when you first load the page.
+* Reduced the number of columns in the search results so the items are larger. I used a pixel-based width measurement, but for most phones this should mean dropping from 4 columns to 3.
+
+January 23, 2025:
+
+* Added a new mobile UI that's very similar to the desktop UI, instead of maintaining two separate interfaces for desktop and mobile. 
+* Replaced the very complex Canvas graphics code with plain HTML elements and browser-native drag and drop functionality. This change is less immediately noticeable but should vastly improve performance, reduce bugs, and make it a lot easier for me to add features such as new layouts in the future.
+* Updated the method for removing items from the chart. Instead of dragging an item out of bounds, there is now an X button on each item. This button appears on hover when using a mouse, and is always visible when on a touchscreen.
+* Tabs will now remember their content when you switch between them. Previously, for example, typing in a search, switching to Options, and switching back to Search would empty the search box and results list. That behavior is now fixed.
+
+October 29, 2024: Redesigned the Options menu to be nicer looking, especially on Safari. Also, rewrote the Options menu code to be cleaner and less bug prone.
+
+June 22, 2024: Optimized the way the chart is rendered. The most significant change is that we're now using a separate Canvas layer for drag-and-drop, which should improve the framerate when moving items around on larger charts.
+
+January 27, 2024: Redesigned with a sleek new dark theme for a belated celebration of Topsters 3's second birthday. In addition to a total UI overhaul, this redesign adds a chart export feature and enables some UI elements on mobile that were previously hidden on small screens.
+
+August 2, 2023: Updated the search backend for games to support double the previous number of searches per second. This should fix the intermittently failing game searches.
+
+May 30, 2023: Added the ability to build a chart with your Last.fm listening stats in the Imports panel.
+
+January 14, 2023: Overhauled the frontend build process to use Vite and a newer version of Vue. No visible changes, but it should improve performance and make updates easier.

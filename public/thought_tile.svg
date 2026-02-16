@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 130" role="img" aria-label="Thought tile">
+  <defs>
+    <linearGradient id="thoughtBg" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#1c2333" />
+      <stop offset="100%" stop-color="#141a25" />
+    </linearGradient>
+  </defs>
+  <rect width="130" height="130" rx="12" fill="url(#thoughtBg)" />
+  <path d="M87 74c8 0 15-7 15-15 0-9-8-16-17-15-3-8-10-13-19-13-12 0-22 9-23 21-9 1-16 8-16 18 0 10 8 18 18 18h42z" fill="#f25f7a" />
+  <circle cx="49" cy="94" r="6" fill="#f25f7a" />
+  <circle cx="39" cy="103" r="4" fill="#f25f7a" />
+  <path d="M46 56h38" stroke="#ffd8e0" stroke-linecap="round" stroke-width="4" />
+  <path d="M46 64h28" stroke="#ffd8e0" stroke-linecap="round" stroke-width="4" />
+</svg>

@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "rOKy+7fnPDM=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\39389\\Desktop\\crazy ai repo\\thoughtslibrary\\launcher\\ThoughtsLibraryLauncher.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\39389\\.nuget\\packages\\microsoft.net.illink.tasks\\8.0.17\\microsoft.net.illink.tasks.8.0.17.nupkg.sha512"
+  ],
+  "logs": []
+}

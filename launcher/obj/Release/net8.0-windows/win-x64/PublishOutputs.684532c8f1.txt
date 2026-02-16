@@ -1,0 +1,2 @@
+C:\Users\39389\Desktop\crazy ai repo\thoughtslibrary\launcher\bin\Release\net8.0-windows\win-x64\publish\ThoughtsLibraryLauncher.pdb
+C:\Users\39389\Desktop\crazy ai repo\thoughtslibrary\launcher\bin\Release\net8.0-windows\win-x64\publish\ThoughtsLibraryLauncher.exe
