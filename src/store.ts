@@ -13,6 +13,10 @@ export const MAX_CHART_DIMENSION = 60
 export const MAX_CHART_ITEMS = MAX_CHART_DIMENSION * MAX_CHART_DIMENSION
 const THOUGHT_ICON_URL = '/thought_tile.svg'
 const LEGACY_NOTES_ICON_URL = '/notes_tile.svg'
+const DEFAULT_CHART_SIZE: ChartSize = {
+  x: 5,
+  y: 5,
+}
 
 function clampDimension(value: number): number {
   return Math.max(1, Math.min(MAX_CHART_DIMENSION, value))
@@ -129,14 +133,19 @@ function normalizeCoordinates(coordinates: ChartCoordinates): ChartCoordinates {
 }
 
 export const initialState = {
-  chart: {
+  chart: createEmptyChart(),
+  collapsed: true,
+  activeTileKey: null,
+  textUndoStack: [],
+  isApplyingTextUndo: false,
+} as State
+
+export function createEmptyChart(): Chart {
+  return {
     title: '',
     coordinates: {},
-    items: Array.from({ length: MAX_CHART_ITEMS }).fill(null),
-    size: {
-      x: 5,
-      y: 5,
-    },
+    items: itemsFromCoordinates({}, DEFAULT_CHART_SIZE),
+    size: { ...DEFAULT_CHART_SIZE },
     backgroundUrl: '',
     backgroundColor: '#000000',
     backgroundType: BackgroundTypes.Color,
@@ -147,12 +156,8 @@ export const initialState = {
     textColor: '#ffffff',
     shadows: true,
     roundCorners: false,
-  },
-  collapsed: true,
-  activeTileKey: null,
-  textUndoStack: [],
-  isApplyingTextUndo: false,
-} as State
+  }
+}
 
 interface ItemData {
   data: ChartItem | null
@@ -499,24 +504,22 @@ export const useStore = defineStore('store', {
     },
     setHeight(payload: number) {
       const nextHeight = clampDimension(payload)
+      const nextSize = { ...this.chart.size, y: nextHeight }
+
       this.chart = {
         ...this.chart,
-        size: {
-          ...this.chart.size,
-          y: nextHeight,
-        },
-        items: itemsFromCoordinates(this.chart.coordinates || {}, { ...this.chart.size, y: nextHeight }),
+        size: nextSize,
+        items: itemsFromCoordinates(this.chart.coordinates || {}, nextSize),
       }
     },
     setWidth(payload: number) {
       const nextWidth = clampDimension(payload)
+      const nextSize = { ...this.chart.size, x: nextWidth }
+
       this.chart = {
         ...this.chart,
-        size: {
-          ...this.chart.size,
-          x: nextWidth,
-        },
-        items: itemsFromCoordinates(this.chart.coordinates || {}, { ...this.chart.size, x: nextWidth }),
+        size: nextSize,
+        items: itemsFromCoordinates(this.chart.coordinates || {}, nextSize),
       }
     },
     changeGap(newGap: number) {
@@ -562,11 +565,7 @@ export const useStore = defineStore('store', {
       this.isApplyingTextUndo = false
     },
     reset() {
-      this.chart = {
-        ...initialState.chart,
-        coordinates: {},
-        items: itemsFromCoordinates({}, initialState.chart.size),
-      }
+      this.chart = createEmptyChart()
       this.activeTileKey = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false

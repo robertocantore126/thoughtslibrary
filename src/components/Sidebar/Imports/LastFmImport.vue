@@ -5,7 +5,7 @@ import type { ChartItem, LastfmChartResponseItem, Period } from '../../../types'
 import { ref } from 'vue'
 import { getLastfmChart } from '../../../api/lastfm'
 import { createNewChart, periodHeaders } from '../../../helpers/chart'
-import { initialState, MAX_CHART_ITEMS, useStore } from '../../../store'
+import { createEmptyChart, MAX_CHART_ITEMS, useStore } from '../../../store'
 
 const store = useStore()
 
@@ -74,7 +74,7 @@ async function importLastFmChart() {
   }
 
   store.setEntireChart({
-    ...initialState.chart,
+    ...createEmptyChart(),
     title: `${username}'s ${periodHeaders[period]} Chart`,
     items: newItems,
     size: getSize(filtered.length),

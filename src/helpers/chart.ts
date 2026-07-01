@@ -5,7 +5,8 @@ import type {
   Result,
 } from '../types'
 import { backendBaseUrl } from '../api/config'
-import { initialState, useStore } from '../store'
+import { createEmptyChart, useStore } from '../store'
+import { inlineStoredImageUrl, isLocalAssetUrl } from './assets'
 import { appendChart, getActiveChart, setActiveChart } from './localStorage'
 import {
   isBookResult,
@@ -21,7 +22,7 @@ import {
 export function initializeFirstRun(): void {
   const newUuid = appendChart({
     timestamp: new Date().getTime(),
-    data: initialState.chart,
+    data: createEmptyChart(),
   })
 
   setActiveChart(newUuid)
@@ -95,6 +96,8 @@ export async function downloadChart(): Promise<void> {
     throw new Error('Chart not found! Something must have gone horribly wrong.')
   }
 
+  const restoreChartImages = await inlineLocalImagesForExport(element)
+
   // Remove the scale transform - otherwise, html2canvas
   // will download a degraded quality version of the chart.
   const onclone = (doc: Document) => {
@@ -115,17 +118,22 @@ export async function downloadChart(): Promise<void> {
     }
   }
 
-  const result = await html2Canvas.default(element, {
-    useCORS: true,
-    onclone,
-    proxy: `${backendBaseUrl}/api/proxy`,
-    backgroundColor: null,
-    scale: 1,
-  })
+  try {
+    const result = await html2Canvas.default(element, {
+      useCORS: true,
+      onclone,
+      proxy: `${backendBaseUrl}/api/proxy`,
+      backgroundColor: null,
+      scale: 1,
+    })
 
-  const blob = await new Promise(resolve => result.toBlob(resolve)) as Blob
-  const url = URL.createObjectURL(blob)
-  saveChartImage(url)
+    const blob = await new Promise(resolve => result.toBlob(resolve)) as Blob
+    const url = URL.createObjectURL(blob)
+    saveChartImage(url)
+  }
+  finally {
+    restoreChartImages()
+  }
 }
 
 // Saves the chart as an image
@@ -140,10 +148,58 @@ function saveChartImage(url: string): void {
   document.body.removeChild(link)
 }
 
+async function waitForImageLoad(img: HTMLImageElement) {
+  if (img.complete && img.naturalWidth > 0) {
+    return
+  }
+
+  await new Promise<void>((resolve) => {
+    const cleanup = () => {
+      img.removeEventListener('load', onDone)
+      img.removeEventListener('error', onDone)
+      resolve()
+    }
+
+    const onDone = () => {
+      cleanup()
+    }
+
+    img.addEventListener('load', onDone, { once: true })
+    img.addEventListener('error', onDone, { once: true })
+  })
+}
+
+async function inlineLocalImagesForExport(element: HTMLElement): Promise<() => void> {
+  const images = Array.from(element.querySelectorAll('img[data-stored-src]')) as HTMLImageElement[]
+  const originals: Array<{ img: HTMLImageElement, src: string }> = []
+
+  for (const img of images) {
+    const storedSrc = img.dataset.storedSrc || ''
+    if (!isLocalAssetUrl(storedSrc)) {
+      continue
+    }
+
+    const inlineSrc = await inlineStoredImageUrl(storedSrc)
+    if (!inlineSrc) {
+      continue
+    }
+
+    originals.push({ img, src: img.src })
+    img.src = inlineSrc
+    await waitForImageLoad(img)
+  }
+
+  return () => {
+    for (const entry of originals) {
+      entry.img.src = entry.src
+    }
+  }
+}
+
 export function createNewChart() {
   const newUuid = appendChart({
     timestamp: new Date().getTime(),
-    data: initialState.chart,
+    data: createEmptyChart(),
   })
 
   setActiveChart(newUuid)

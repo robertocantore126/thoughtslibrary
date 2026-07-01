@@ -1,12 +1,59 @@
 <script setup lang="ts">
 import type { ComputedRef, CSSProperties } from 'vue'
-import type { Chart } from '../../../types'
 import { computed } from 'vue'
 import { useStore } from '../../../store'
 import { BackgroundTypes } from '../../../types'
 import Row from './Row.vue'
 
 const store = useStore()
+
+function getTileSize(): { width: number, height: number } {
+  const rowFlex = document.querySelector('#chart .row-flex')?.getBoundingClientRect()
+  const cols = store.chart.size.x
+
+  if (!rowFlex) {
+    return { width: 1, height: 1 }
+  }
+
+  return {
+    width: rowFlex.width / cols,
+    height: rowFlex.width / cols,
+  }
+}
+
+function getTileCoordinates(event: MouseEvent): { x: number, y: number } {
+  const chartElement = document.querySelector('#chart')
+  const rowFlex = document.querySelector('#chart .row-flex')
+  if (!chartElement || !rowFlex) {
+    return { x: 1, y: 1 }
+  }
+
+  const chartRect = chartElement.getBoundingClientRect()
+  const contentRect = rowFlex.getBoundingClientRect()
+  const localX = event.clientX - contentRect.left
+  const localY = event.clientY - contentRect.top
+  const tileWidth = contentRect.width / store.chart.size.x
+  const tileHeight = tileWidth
+  const x = Math.min(store.chart.size.x, Math.max(1, Math.floor(localX / tileWidth) + 1))
+  const y = Math.min(store.chart.size.y, Math.max(1, Math.floor(localY / tileHeight) + 1))
+
+  return { x, y }
+}
+
+function normalizeSelection(start: { x: number, y: number }, end: { x: number, y: number }) {
+  const x1 = Math.min(start.x, end.x)
+  const x2 = Math.max(start.x, end.x)
+  const y1 = Math.min(start.y, end.y)
+  const y2 = Math.max(start.y, end.y)
+
+  return {
+    x: x1,
+    y: y1,
+    width: x2 - x1 + 1,
+    height: y2 - y1 + 1,
+  }
+}
+
 
 function getBackgroundStyle(chart: Chart): CSSProperties {
   if (chart.backgroundType === BackgroundTypes.Color) {
@@ -41,6 +88,29 @@ const chartStyle: ComputedRef<CSSProperties> = computed(() => ({
   color: store.chart.textColor,
   ...getBackgroundStyle(store.chart),
 }))
+
+interface VisualRow {
+  rowNumber: number
+  indices: number[]
+}
+
+const visualRows = computed<VisualRow[]>(() => {
+  const width = store.chart.size.x
+  const height = store.chart.size.y
+  const rows: VisualRow[] = []
+
+  for (let rowNumber = 1; rowNumber <= height; rowNumber += 1) {
+    const start = (rowNumber - 1) * width
+    const indices = Array.from({ length: width }, (_, idx) => start + idx)
+
+    rows.push({
+      rowNumber,
+      indices,
+    })
+  }
+
+  return rows
+})
 </script>
 
 <template>
@@ -55,7 +125,12 @@ const chartStyle: ComputedRef<CSSProperties> = computed(() => ({
         </p>
       </div>
       <div class="row-flex" :style="{ gap: `${store.chart.gap}px`, padding: `${store.chart.gap}px`, paddingTop: store.chart.title ? `${store.chart.gap / 2}px` : `${store.chart.gap}px` }">
-        <Row v-for="rowNumber in store.chart.size.y" :key="rowNumber" :row="rowNumber" />
+        <Row
+          v-for="row in visualRows"
+          :key="row.rowNumber"
+          :row-number="row.rowNumber"
+          :indices="row.indices"
+        />
       </div>
     </div>
   </div>
@@ -74,6 +149,7 @@ const chartStyle: ComputedRef<CSSProperties> = computed(() => ({
 
 #chart {
   display: inline-block;
+  position: relative;
 }
 
 #chart .chart-title {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
-import { fileToDataUrl } from '../helpers/files'
+import { useResolvedImageUrl } from '../composables/useResolvedImageUrl'
+import { storeLocalImage } from '../helpers/assets'
 import { useStore } from '../store'
 
 const store = useStore()
@@ -32,6 +33,7 @@ const activeTileAttachment = computed({
   get: () => store.activeTileAttachment,
   set: (value: string) => store.setActiveTileAttachment(value),
 })
+const activeTileCoverUrl = useResolvedImageUrl(() => activeTile.value?.item.coverURL)
 
 function updateTitle(event: Event) {
   store.setActiveTileTitle((event.target as HTMLInputElement).value)
@@ -61,8 +63,7 @@ async function onAttachmentFilePicked(event: Event) {
   }
 
   try {
-    const dataUrl = await fileToDataUrl(file)
-    activeTileAttachment.value = dataUrl
+    activeTileAttachment.value = await storeLocalImage(file)
   }
   catch (e) {
     console.error(e)
@@ -125,7 +126,7 @@ onUnmounted(() => {
         </button>
       </div>
       <div class="selected-tile">
-        <img :src="activeTile.item.coverURL" :alt="activeTile.item.title">
+        <img :src="activeTileCoverUrl" :alt="activeTile.item.title">
         <label class="field-label" for="tileTitle">Title</label>
         <input id="tileTitle" :value="activeTile.item.title" class="field-input" type="text" placeholder="Item title" @input="updateTitle">
         <label v-if="!isThoughtTile" class="field-label" for="tileCreator">Creator (optional)</label>

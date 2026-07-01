@@ -4,6 +4,7 @@
 
 import type { ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } from '../types'
 import { BackgroundTypes } from '../types'
+import { inlineStoredChartAssets, persistChartAssets } from './assets'
 import { forceRefresh } from './chart'
 import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, migrateChart, setActiveChart, updateStoredChart } from './localStorage'
 import { MAX_CHART_DIMENSION } from '../store'
@@ -35,27 +36,51 @@ function downloadChartData(data: string, title: string, timestamp: number) {
   link.remove()
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    const chunk = bytes.subarray(i, i + 0x8000)
+    binary += String.fromCharCode(...chunk)
+  }
+
+  return btoa(binary)
+}
+
+function base64ToBytes(text: string): Uint8Array {
+  const decoded = atob(text.trim())
+
+  if (/^[\d,\s]+$/.test(decoded) && decoded.includes(',')) {
+    return Uint8Array.from(
+      decoded
+        .split(',')
+        .map(num => Number.parseInt(num.trim(), 10))
+        .filter(num => !Number.isNaN(num)),
+    )
+  }
+
+  return Uint8Array.from(decoded, char => char.charCodeAt(0))
+}
+
 export async function exportCurrentChart() {
   const uuid = getActiveChartUuid()
+  const activeChart = await inlineStoredChartAssets(getActiveChart())
 
   const exportObj: StoredCharts = {
-    [uuid]: getActiveChart(),
+    [uuid]: activeChart,
   }
 
   const str = JSON.stringify(exportObj)
   const arr = new TextEncoder().encode(str)
   const zlibbed = await zlib(arr)
-
-  const compressed = btoa(zlibbed.toString())
+  const compressed = bytesToBase64(zlibbed)
 
   downloadChartData(compressed, exportObj[uuid].data.title, exportObj[uuid].timestamp)
 }
 
 export async function parseUploadedText(text: string) {
-  const uintArray = Uint8Array.from(atob(text).split(',').map(num => Number.parseInt(num)))
-
   const textDecoder = new TextDecoder()
-
+  const uintArray = base64ToBytes(text)
   const unzlibbed = await unzlib(uintArray)
 
   const decoded = textDecoder.decode(unzlibbed)
@@ -76,6 +101,7 @@ export async function importChart(event: Event) {
     const newChart = json[newChartUuid] as StoredPremigrationChart
 
     migrateChart(newChart)
+    newChart.data = await persistChartAssets(newChart.data)
 
     let overwriteConsent = false
 

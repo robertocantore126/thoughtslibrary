@@ -3,10 +3,13 @@
   "type": "module",
   "version": "1.0.0",
   "private": true,
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build",
     "preview": "vite preview --port 5050",
+    "desktop:dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173\" \"wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://127.0.0.1:5173 electron .\"",
+    "desktop:dist": "npm run build && electron-builder --win portable",
     "lint": "eslint .",
     "lint-fix": "eslint . --fix"
   },
@@ -15,6 +18,7 @@
     "drag-drop-touch": "github:drag-drop-touch-js/dragdroptouch",
     "html2canvas": "github:camdendotlol/html2canvas-smart-cors#prod",
     "pinia": "^2.3.0",
+    "serve-handler": "^6.1.6",
     "uuid": "^11.0.3",
     "vue": "^3.5.13"
   },
@@ -22,9 +26,32 @@
     "@antfu/eslint-config": "^3.11.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/tsconfig": "^0.7.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
     "eslint": "^9.16.0",
     "typescript": "^5.6.3",
     "vite": "^6.0.11",
-    "vue-tsc": "^2.2.0"
+    "vue-tsc": "^2.2.0",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "org.thoughtslibrary.desktop",
+    "productName": "ThoughtsLibrary",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "portable"
+      ]
+    }
   }
 }

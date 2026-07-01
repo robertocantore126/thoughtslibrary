@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
+
 interface Props {
   imageData: {
     src: string
@@ -7,11 +9,12 @@ interface Props {
 }
 
 const props = defineProps<Props>()
+const resolvedImageUrl = useResolvedImageUrl(() => props.imageData.src)
 </script>
 
 <template>
   <img
-    :src="props.imageData.src"
+    :src="resolvedImageUrl"
     :alt="props.imageData.alt"
   >
 </template>

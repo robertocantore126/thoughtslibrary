@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Ref } from 'vue'
 import { ref } from 'vue'
-import { fileToDataUrl } from '../../../helpers/files'
+import { storeLocalImage } from '../../../helpers/assets'
 
 const emit = defineEmits([
   'updateResults',
@@ -72,8 +72,8 @@ async function processLocalFile(file: File) {
   localFileName.value = file.name
 
   try {
-    const dataUrl = await fileToDataUrl(file)
-    emitCustomItem(dataUrl, buildTitleFromFilename(file.name))
+    const storedUrl = await storeLocalImage(file)
+    emitCustomItem(storedUrl, buildTitleFromFilename(file.name))
   }
   catch (e) {
     console.error(e)

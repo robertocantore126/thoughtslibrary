@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
+import { persistChartAssets } from '../helpers/assets'
 import { initializeFirstRun } from '../helpers/chart'
 import {
   appendChart,
   getActiveChart,
   getActiveChartUuid,
+  getStoredCharts,
   localStorageMigrations,
+  setStoredCharts,
   setActiveChart,
   updateStoredChart,
 } from '../helpers/localStorage'
@@ -22,8 +25,20 @@ function isStorageQuotaExceeded(error: unknown): boolean {
   return error.name === 'QuotaExceededError' || error.code === 22
 }
 
-onMounted(() => {
+onMounted(async () => {
   localStorageMigrations()
+
+  const storedCharts = getStoredCharts()
+  const normalizedEntries = await Promise.all(
+    Object.entries(storedCharts).map(async ([uuid, chart]) => {
+      return [uuid, {
+        ...chart,
+        data: await persistChartAssets(chart.data),
+      }] as const
+    }),
+  )
+
+  setStoredCharts(Object.fromEntries(normalizedEntries))
 
   const activeChart = getActiveChart()
 

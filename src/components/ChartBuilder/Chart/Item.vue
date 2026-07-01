@@ -3,14 +3,19 @@ import type { ComputedRef, CSSProperties } from 'vue'
 import type { ChartItem } from '../../../types'
 import { BIconX } from 'bootstrap-icons-vue'
 import { computed } from 'vue'
-import { fileToDataUrl } from '../../../helpers/files'
+import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
+import { storeLocalImage } from '../../../helpers/assets'
 import { useStore } from '../../../store'
 
-const props = defineProps(['item', 'index', 'title', 'number'])
+const props = defineProps(['item', 'index', 'title', 'number', 'visualRow'])
 
 const store = useStore()
-const ITEM_SIZE_PX = 130
+const BASE_ITEM_SIZE_PX = 130
 const SUPPORTED_IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|webp)(\?.*)?(#.*)?$/i
+
+function getTileScale(row: number): number {
+  return 1
+}
 
 function allowDrop(ev: DragEvent) {
   ev.preventDefault()
@@ -32,13 +37,13 @@ function handleDragStart(ev: DragEvent) {
   if (ev.dataTransfer) {
     const dragImg = new Image()
     dragImg.classList.add('dnd-img')
-    dragImg.src = props.item.coverURL
+    dragImg.src = itemCoverUrl.value || props.item.coverURL
 
     const container = document.createElement('div')
     container.classList.add('dnd-container')
     container.appendChild(dragImg)
 
-    const scaledSize = ITEM_SIZE_PX
+    const scaledSize = tileSizePx.value
     container.style.height = `${scaledSize}px`
     container.style.width = `${scaledSize}px`
 
@@ -142,8 +147,8 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
   const firstSupportedFile = Array.from(dataTransfer.files).find(file => isSupportedImageFile(file))
   if (firstSupportedFile) {
     try {
-      const dataUrl = await fileToDataUrl(firstSupportedFile)
-      addDroppedImageToTile(dataUrl, extractTitleFromPath(firstSupportedFile.name))
+      const storedUrl = await storeLocalImage(firstSupportedFile)
+      addDroppedImageToTile(storedUrl, extractTitleFromPath(firstSupportedFile.name))
       return true
     }
     catch (e) {
@@ -195,10 +200,24 @@ const tileCoordinates = computed(() => ({
   x: (props.index % store.chart.size.x) + 1,
   y: Math.floor(props.index / store.chart.size.x) + 1,
 }))
+const tileScale = computed(() => getTileScale(Number(props.visualRow) || tileCoordinates.value.y))
+const tileSizePx = computed(() => Math.round(BASE_ITEM_SIZE_PX * tileScale.value))
+const itemStyle: ComputedRef<CSSProperties> = computed(() => ({
+  width: `${tileSizePx.value}px`,
+  minWidth: `${tileSizePx.value}px`,
+}))
+const coverFrameStyle: ComputedRef<CSSProperties> = computed(() => ({
+  width: `${tileSizePx.value}px`,
+  height: `${tileSizePx.value}px`,
+}))
+const titleStyle: ComputedRef<CSSProperties> = computed(() => ({
+  fontSize: `${Math.max(0.62, 0.62 * Math.min(tileScale.value, 1.2))}rem`,
+  lineHeight: `${Math.max(1.2, 1.2 * Math.min(tileScale.value, 1.1))}`,
+}))
 
 const tileKey = computed(() => `${tileCoordinates.value.x},${tileCoordinates.value.y}`)
 const isActiveTile = computed(() => store.activeTileKey === tileKey.value)
-const thoughtAttachmentUrl = computed(() => {
+const rawThoughtAttachmentUrl = computed(() => {
   const isThoughtLike = props.item?.itemType === 'thought' || props.item?.coverURL === '/thought_tile.svg'
   if (!isThoughtLike) {
     return ''
@@ -206,6 +225,8 @@ const thoughtAttachmentUrl = computed(() => {
 
   return props.item.attachmentURL || ''
 })
+const itemCoverUrl = useResolvedImageUrl(() => props.item?.coverURL)
+const thoughtAttachmentUrl = useResolvedImageUrl(() => rawThoughtAttachmentUrl.value)
 const normalizedRating = computed(() => {
   const raw = props.item?.rating
   if (!raw) {
@@ -232,7 +253,14 @@ const ratingColor = computed(() => {
   return '#63ecff'
 })
 
-function selectTile() {
+function handleTileClick(event: MouseEvent) {
+  if ((event.ctrlKey || event.metaKey) && props.item) {
+    event.preventDefault()
+    event.stopPropagation()
+    deleteItem()
+    return
+  }
+
   if (!props.item) {
     return
   }
@@ -251,13 +279,13 @@ function deleteItem() {
     :class="`item ${props.item ? '' : 'placeholder'}`"
     :data-index="props.index"
     :draggable="props.item ? 'true' : 'false'"
-    :style="props.item ? undefined : imgStyle"
-    @click="selectTile"
+    :style="props.item ? itemStyle : { ...itemStyle, ...imgStyle }"
+    @click="handleTileClick"
     @dragstart="handleDragStart"
     @dragover="allowDrop"
     @drop="handleDrop"
   >
-    <div :class="`cover-frame ${isActiveTile ? 'active-tile' : ''}`">
+    <div :class="`cover-frame ${isActiveTile ? 'active-tile' : ''}`" :style="coverFrameStyle">
       <div v-if="shownStars.length > 0" class="rating-indicator" aria-label="Item rating">
         <span
           v-for="star in shownStars"
@@ -272,6 +300,7 @@ function deleteItem() {
       <img
         v-if="thoughtAttachmentUrl"
         :src="thoughtAttachmentUrl"
+        :data-stored-src="rawThoughtAttachmentUrl"
         class="thought-attachment"
         alt="Thought attachment"
       >
@@ -286,12 +315,13 @@ function deleteItem() {
       </button>
       <img
         v-if="item"
-        :src="item.coverURL"
+        :src="itemCoverUrl"
+        :data-stored-src="props.item?.coverURL || ''"
         class="item-img"
         :style="imgStyle"
       >
     </div>
-    <p v-if="props.item && store.chart.showTitles" class="item-title">
+    <p v-if="props.item && store.chart.showTitles" class="item-title" :style="titleStyle">
       {{ store.chart.showNumbers && props.number ? `${props.number}. ` : '' }}{{ props.title }}
     </p>
   </div>
@@ -299,8 +329,6 @@ function deleteItem() {
 
 <style scoped>
 .item {
-  width: 130px;
-  min-width: 130px;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -311,8 +339,6 @@ function deleteItem() {
 }
 
 .cover-frame {
-  height: 130px;
-  width: 130px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -416,11 +442,12 @@ function deleteItem() {
   margin: 0;
   font-size: 0.62rem;
   line-height: 1.2;
-  height: 0.75rem;
   text-align: left;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: initial;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 @media (hover: none) {

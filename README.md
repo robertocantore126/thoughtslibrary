@@ -34,3 +34,19 @@ Please make sure your changes pass the linter before opening a PR.
 ```
 npm run lint
 ```
+
+## Desktop app (Electron)
+
+Run as a desktop app in development:
+
+```
+npm run desktop:dev
+```
+
+Build a Windows portable desktop executable:
+
+```
+npm run desktop:dist
+```
+
+Output will be created in `release/`.

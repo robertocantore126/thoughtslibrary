@@ -6,7 +6,7 @@ import { BIconArrowRepeat, BIconFileEarmarkArrowDown } from 'bootstrap-icons-vue
 import { ref } from 'vue'
 import { downloadChart, initializeFirstRun } from '../../helpers/chart'
 import { appendChart, destroyChart, getActiveChartUuid, getNewestChartUuid, getStoredCharts, setActiveChart } from '../../helpers/localStorage'
-import { initialState, useStore } from '../../store'
+import { createEmptyChart, useStore } from '../../store'
 import Switcher from './Switcher.vue'
 
 const store = useStore()
@@ -24,7 +24,7 @@ async function saveChart() {
 function startNewChart() {
   const newChart: StoredChart = {
     timestamp: new Date().getTime(),
-    data: initialState.chart,
+    data: createEmptyChart(),
   }
 
   const newUuid = appendChart(newChart)
