@@ -17,6 +17,7 @@
     "bootstrap-icons-vue": "^1.11.3",
     "drag-drop-touch": "github:drag-drop-touch-js/dragdroptouch",
     "html2canvas": "github:camdendotlol/html2canvas-smart-cors#prod",
+    "jspdf": "^4.2.1",
     "pinia": "^2.3.0",
     "serve-handler": "^6.1.6",
     "uuid": "^11.0.3",

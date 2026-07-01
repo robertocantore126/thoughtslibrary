@@ -2,7 +2,7 @@
 import type { ComputedRef, CSSProperties } from 'vue'
 import { computed } from 'vue'
 import { useStore } from '../../../store'
-import { BackgroundTypes } from '../../../types'
+import { BackgroundTypes, type Chart } from '../../../types'
 import Row from './Row.vue'
 
 const store = useStore()

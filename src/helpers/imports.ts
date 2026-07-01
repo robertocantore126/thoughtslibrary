@@ -8,17 +8,72 @@ import { inlineStoredChartAssets, persistChartAssets } from './assets'
 import { forceRefresh } from './chart'
 import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, migrateChart, setActiveChart, updateStoredChart } from './localStorage'
 import { MAX_CHART_DIMENSION } from '../store'
+import { backendBaseUrl } from '../api/config'
+import { inlineStoredImageUrl, isLocalAssetUrl } from './assets'
+import { jsPDF } from 'jspdf'
+
+const LAST_CHART_FILE_PATH_KEY = 'lastChartFilePath'
+
+function getWindowApi() {
+  return (window as Window & typeof globalThis & {
+    electronAPI?: {
+      saveChartFile: (payload: {
+        filePath?: string
+        suggestedName?: string
+        content: string
+      }) => Promise<{
+        success: boolean
+        canceled?: boolean
+        filePath?: string
+        error?: string
+      }>
+    }
+  }).electronAPI
+}
+
+function getLastChartFilePath() {
+  return window.localStorage.getItem(LAST_CHART_FILE_PATH_KEY) || ''
+}
+
+function rememberChartFilePath(filePath: string) {
+  if (!filePath) {
+    return
+  }
+
+  window.localStorage.setItem(LAST_CHART_FILE_PATH_KEY, filePath)
+}
+
+function normalizeChartTitle(title: string) {
+  return (title || 'chart')
+    .trim()
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/(^-|-$)/g, '') || 'chart'
+}
+
+function asBuffer(data: Uint8Array) {
+  return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength))
+}
 
 async function unzlib(data: Uint8Array) {
-  const stream = new Response(data).body.pipeThrough(new DecompressionStream('deflate'))
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(asBuffer(data))
+      controller.close()
+    },
+  }).pipeThrough(new DecompressionStream('deflate') as never)
 
-  return new Uint8Array(await new Response(stream).arrayBuffer())
+  return new Uint8Array(await new Response(stream as ReadableStream<Uint8Array>).arrayBuffer())
 }
 
 async function zlib(data: Uint8Array) {
-  const stream = new Response(data).body.pipeThrough(new CompressionStream('deflate'))
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(asBuffer(data))
+      controller.close()
+    },
+  }).pipeThrough(new CompressionStream('deflate') as never)
 
-  return new Uint8Array(await new Response(stream).arrayBuffer())
+  return new Uint8Array(await new Response(stream as ReadableStream<Uint8Array>).arrayBuffer())
 }
 
 function downloadChartData(data: string, title: string, timestamp: number) {
@@ -78,6 +133,258 @@ export async function exportCurrentChart() {
   downloadChartData(compressed, exportObj[uuid].data.title, exportObj[uuid].timestamp)
 }
 
+function sanitizePdfText(value: string | undefined) {
+  return (value || '').replace(/\s+/g, ' ').trim()
+}
+
+function getPdfExportApi() {
+  return (window as Window & typeof globalThis & {
+    electronAPI?: {
+      printChartToPdf: (payload: {
+        widthPixels: number
+        heightPixels: number
+        title: string
+      }) => Promise<{
+        success: boolean
+        canceled?: boolean
+        filePath?: string
+        error?: string
+      }>
+    }
+  }).electronAPI
+}
+
+async function waitForImageLoad(img: HTMLImageElement) {
+  if (img.complete && img.naturalWidth > 0) {
+    return
+  }
+
+  await new Promise<void>((resolve) => {
+    const cleanup = () => {
+      img.removeEventListener('load', onDone)
+      img.removeEventListener('error', onDone)
+      resolve()
+    }
+
+    const onDone = () => {
+      cleanup()
+    }
+
+    img.addEventListener('load', onDone, { once: true })
+    img.addEventListener('error', onDone, { once: true })
+  })
+}
+
+async function inlineLocalImagesForPdfExport(element: HTMLElement): Promise<() => void> {
+  const images = Array.from(element.querySelectorAll('img[data-stored-src]')) as HTMLImageElement[]
+  const originals: Array<{ img: HTMLImageElement, src: string }> = []
+
+  for (const img of images) {
+    const storedSrc = img.dataset.storedSrc || ''
+    if (!isLocalAssetUrl(storedSrc)) {
+      continue
+    }
+
+    const inlineSrc = await inlineStoredImageUrl(storedSrc)
+    if (!inlineSrc) {
+      continue
+    }
+
+    originals.push({ img, src: img.src })
+    img.src = inlineSrc
+    await waitForImageLoad(img)
+  }
+
+  return () => {
+    for (const entry of originals) {
+      entry.img.src = entry.src
+    }
+  }
+}
+
+function getTilePdfEntries(chart: StoredChart['data']) {
+  const entries = [] as Array<{
+    title: string
+    text: string
+    key: string
+  }>
+
+  const items = chart.items || []
+  const coordinates = chart.coordinates || {}
+
+  items.forEach((item, index) => {
+    if (!item) {
+      return
+    }
+
+    const position = Object.entries(coordinates).find(([key, value]) => value === item && key)
+    const tileLabel = position?.[0] || `Tile ${index + 1}`
+    const title = [item.creator, item.title].filter(Boolean).join(' - ') || `Tile ${index + 1}`
+    const text = [item.notes, item.creator && item.title ? undefined : undefined].filter(Boolean).join('')
+    entries.push({
+      key: tileLabel,
+      title,
+      text: sanitizePdfText(item.notes || ''),
+    })
+  })
+
+  return entries
+}
+
+export async function exportCurrentChartToPdf() {
+  const activeChart = await inlineStoredChartAssets(getActiveChart())
+  const chartTitle = sanitizePdfText(activeChart.data.title) || 'chart'
+  const chartElement = document.querySelector('#chart') as HTMLElement | null
+
+  if (!chartElement) {
+    throw new Error('Chart not found')
+  }
+
+  const restoreChartImages = await inlineLocalImagesForPdfExport(chartElement)
+  const html2Canvas = await import('html2canvas')
+
+  const onclone = (doc: Document) => {
+    const chart = doc.querySelector('#chart') as HTMLElement | null
+    if (chart) {
+      chart.style.transform = 'none'
+      chart.style.maxHeight = '10000px'
+      chart.style.maxWidth = '10000px'
+    }
+
+    const placeholders = doc.querySelectorAll('.placeholder')
+    placeholders.forEach((placeholder) => {
+      const placeholderElement = placeholder as HTMLElement
+      placeholderElement.classList.remove('placeholder')
+      placeholderElement.style.boxShadow = 'none'
+    })
+  }
+
+  try {
+    const canvas = await html2Canvas.default(chartElement, {
+      useCORS: true,
+      onclone,
+      proxy: `${backendBaseUrl}/api/proxy`,
+      backgroundColor: '#ffffff',
+      scale: 2,
+    })
+
+    const imgData = canvas.toDataURL('image/png')
+    const pdfWidth = canvas.width
+    const pdfHeight = canvas.height
+    const pdf = new jsPDF({
+      orientation: pdfWidth >= pdfHeight ? 'landscape' : 'portrait',
+      unit: 'px',
+      format: [pdfWidth, pdfHeight],
+    })
+
+    pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight)
+    pdf.addPage('a4', 'portrait')
+
+    pdf.setFontSize(20)
+    pdf.text(`${chartTitle} - Tile text`, 40, 40)
+    pdf.setFontSize(11)
+
+    const entries = getTilePdfEntries(activeChart.data)
+    let y = 70
+    for (const entry of entries) {
+      if (y > 760) {
+        pdf.addPage('a4', 'portrait')
+        y = 40
+      }
+
+      pdf.setFont('helvetica', 'bold')
+      pdf.text(`${entry.key}: ${entry.title}`, 40, y)
+      y += 16
+      if (entry.text) {
+        const splitText = pdf.splitTextToSize(entry.text, 500)
+        pdf.setFont('helvetica', 'normal')
+        pdf.text(splitText, 56, y)
+        y += 16 * splitText.length + 8
+      }
+      else {
+        y += 8
+      }
+    }
+
+    const safeTitle = chartTitle.replace(/[^a-z0-9]+/gi, '-').replace(/(^-|-$)/g, '') || 'chart'
+    pdf.save(`${safeTitle}.pdf`)
+  }
+  finally {
+    restoreChartImages()
+  }
+}
+
+export async function saveCurrentChartToFile(filePath?: string) {
+  const uuid = getActiveChartUuid()
+  const activeChart = await inlineStoredChartAssets(getActiveChart())
+
+  const exportObj: StoredCharts = {
+    [uuid]: activeChart,
+  }
+
+  const str = JSON.stringify(exportObj)
+  const arr = new TextEncoder().encode(str)
+  const zlibbed = await zlib(arr)
+  const compressed = bytesToBase64(zlibbed)
+
+  const result = await (async () => {
+    const api = getWindowApi()
+
+    if (api?.saveChartFile) {
+      return api.saveChartFile({
+        filePath: filePath || getLastChartFilePath() || undefined,
+        suggestedName: `${normalizeChartTitle(activeChart.data.title)}.topster`,
+        content: compressed,
+      })
+    }
+
+    const windowWithPicker = window as Window & typeof globalThis & {
+      showSaveFilePicker?: (options: {
+        suggestedName?: string
+        types?: Array<{
+          description: string
+          accept: Record<string, string[]>
+        }>
+      }) => Promise<{
+        name: string
+        createWritable: () => Promise<{
+          write: (data: string) => Promise<void>
+          close: () => Promise<void>
+        }>
+      }>
+    }
+
+    if (typeof windowWithPicker.showSaveFilePicker === 'function') {
+      const handle = await windowWithPicker.showSaveFilePicker({
+        suggestedName: `${normalizeChartTitle(activeChart.data.title)}.topster`,
+        types: [{
+          description: 'Topster files',
+          accept: {
+            'text/plain': ['.topster'],
+          },
+        }],
+      })
+      const writable = await handle.createWritable()
+      await writable.write(compressed)
+      await writable.close()
+      return { success: true, filePath: handle.name }
+    }
+
+    return { success: false, error: 'File save API unavailable in this context' }
+  })()
+
+  if (!result.success) {
+    if ('canceled' in result && result.canceled) {
+      return false
+    }
+
+    throw new Error('error' in result ? result.error : 'Failed to save chart file')
+  }
+
+  rememberChartFilePath('filePath' in result ? result.filePath || '' : '')
+  return true
+}
+
 export async function parseUploadedText(text: string) {
   const textDecoder = new TextDecoder()
   const uintArray = base64ToBytes(text)
@@ -94,6 +401,11 @@ export async function importChart(event: Event) {
   try {
     const text = await files[0].text()
     const results = await parseUploadedText(text)
+    const importedFilePath = (files[0] as File & { path?: string }).path
+
+    if (importedFilePath) {
+      rememberChartFilePath(importedFilePath)
+    }
     const json = JSON.parse(results) as StoredCharts
 
     const newChartUuid = Object.keys(json)[0]

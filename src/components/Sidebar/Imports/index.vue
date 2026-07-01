@@ -4,12 +4,16 @@ import {
   BIcon2CircleFill,
   BIconArrowDownSquare,
   BIconArrowUpSquare,
+  BIconFloppy,
+  BIconFileEarmarkPdf,
 } from 'bootstrap-icons-vue'
 import { ref } from 'vue'
 import {
   exportCurrentChart,
+  exportCurrentChartToPdf,
   importChart,
   importTopsters2,
+  saveCurrentChartToFile,
 } from '../../../helpers/imports'
 import LastFmImport from './LastFmImport.vue'
 
@@ -33,6 +37,30 @@ function importTopsters2Charts(event) {
 async function callImportCharts(event) {
   await importChart(event)
 }
+
+async function saveChart() {
+  try {
+    const saved = await saveCurrentChartToFile()
+
+    if (saved) {
+      alert('Chart saved successfully!')
+    }
+  }
+  catch (error) {
+    console.error(error)
+    alert(`Failed to save chart: ${error}`)
+  }
+}
+
+async function exportChartToPdf() {
+  try {
+    await exportCurrentChartToPdf()
+  }
+  catch (error) {
+    console.error(error)
+    alert(`Failed to export PDF: ${error}`)
+  }
+}
 </script>
 
 <template>
@@ -49,6 +77,18 @@ async function callImportCharts(event) {
       >
         <BIconArrowUpSquare />
         <span>Import chart data</span>
+      </button>
+      <button
+        @click="saveChart"
+      >
+        <BIconFloppy />
+        <span>Save current chart</span>
+      </button>
+      <button
+        @click="exportChartToPdf"
+      >
+        <BIconFileEarmarkPdf />
+        <span>Export PDF</span>
       </button>
       <button
         class="import-button"
