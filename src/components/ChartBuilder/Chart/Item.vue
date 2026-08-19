@@ -115,6 +115,10 @@ function handleDragStart(ev: DragEvent) {
     return null
   }
 
+  // The notes popup is anchored to its tile, so it would hang over a stale
+  // position for the whole drag. Close it as soon as the drag begins.
+  store.closeNotesPopup()
+
   const dragData = JSON.stringify({
     originalIndex: props.index,
   })
@@ -372,7 +376,7 @@ function deleteItem() {
 }
 
 .item.dimmed {
-  opacity: 0.15;
+  opacity: 0.10;
 }
 
 .item.focused {

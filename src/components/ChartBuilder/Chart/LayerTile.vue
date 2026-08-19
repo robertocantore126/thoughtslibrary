@@ -203,6 +203,9 @@ function handleDragStart(ev: DragEvent) {
     return
   }
 
+  // Same as the grid tiles: the popup is anchored, so drop it on drag start.
+  store.closeNotesPopup()
+
   if (ev.dataTransfer) {
     const dragData = JSON.stringify({ parentId: props.parentId, offset: props.offset })
 

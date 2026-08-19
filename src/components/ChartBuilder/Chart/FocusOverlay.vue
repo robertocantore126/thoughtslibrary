@@ -193,9 +193,23 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
+/* Tile opacity alone only fades tiles toward the chart's own background, which
+   may be light. This wash darkens the whole field behind the layer regardless
+   of what the chart background is set to. */
 .focus-backdrop {
   position: absolute;
   inset: 0;
   pointer-events: auto;
+  background: rgba(0, 0, 0, 0.45);
+  animation: focus-backdrop-in 200ms ease;
+}
+
+@keyframes focus-backdrop-in {
+  from {
+    background: rgba(0, 0, 0, 0);
+  }
+  to {
+    background: rgba(0, 0, 0, 0.45);
+  }
 }
 </style>
