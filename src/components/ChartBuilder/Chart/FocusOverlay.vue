@@ -114,6 +114,26 @@ function tileStyle(offset: string, stagger: number): Record<string, string> {
   }
 }
 
+// Escape dismisses an open note first and only leaves focus mode on a second
+// press. Clicking the backdrop behaves the same way, so a click meant to close
+// a note doesn't also tear down the layer behind it. The note itself is closed
+// by NotesPopup's own outside-click handler; this only records whether one was
+// open when the press started, since by click time it has already gone.
+let noteOpenAtPress = false
+
+function handleBackdropMousedown() {
+  noteOpenAtPress = store.notesPopupVisible
+}
+
+function handleBackdropClick() {
+  if (noteOpenAtPress) {
+    noteOpenAtPress = false
+    return
+  }
+
+  store.exitFocus()
+}
+
 function handleKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && store.focusedTileId && !store.notesPopupVisible) {
     store.exitFocus()
@@ -163,7 +183,8 @@ onUnmounted(() => {
     are later siblings, so they paint above this and swallow their own clicks. -->
     <div
       class="focus-backdrop"
-      @click="store.exitFocus()"
+      @mousedown="handleBackdropMousedown"
+      @click="handleBackdropClick"
       @contextmenu.prevent="store.exitFocus()"
     />
     <LayerTile

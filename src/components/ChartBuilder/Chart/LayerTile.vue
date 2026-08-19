@@ -146,6 +146,17 @@ function handleTileClick(event: MouseEvent) {
     return
   }
 
+  // The parent is a grid tile, not a member of its own layer - offset "0,0" is
+  // never stored, so selectLayerTile would find nothing and select nothing,
+  // leaving the focused tile's own notes and rating unreachable while focused.
+  if (props.isParent) {
+    const coord = store.focusedTileCoord
+    if (coord) {
+      store.selectTile(coord)
+    }
+    return
+  }
+
   store.selectLayerTile({ parentId: props.parentId, offset: props.offset })
 }
 
