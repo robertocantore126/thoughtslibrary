@@ -12,6 +12,7 @@ const props = defineProps(['item', 'index', 'title', 'number', 'visualRow'])
 
 const store = useStore()
 const BASE_ITEM_SIZE_PX = 130
+let dragImageContainer: HTMLElement | null = null
 const SUPPORTED_IMAGE_EXTENSIONS = /\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$/i
 
 function getTileScale(_row: number): number {
@@ -138,11 +139,20 @@ function handleDragStart(ev: DragEvent) {
 
     const appEl = document.querySelector('#app')
     appEl?.appendChild(container)
+    dragImageContainer = container
 
     ev.dataTransfer.effectAllowed = 'move'
     ev.dataTransfer.setData('application/json', dragData)
     ev.dataTransfer.setDragImage(container, scaledSize / 2, scaledSize / 2)
   }
+}
+
+// The drag image has to be a real element in the document for setDragImage to
+// use it, so it is parked offscreen by .dnd-container. Without this it stayed
+// there forever, leaking a node and a decoded image on every single drag.
+function handleDragEnd() {
+  dragImageContainer?.remove()
+  dragImageContainer = null
 }
 
 function getFileExtension(name: string): string {
@@ -327,6 +337,7 @@ function deleteItem() {
       :style="coverFrameStyle"
       :draggable="props.item ? 'true' : 'false'"
       @dragstart="handleDragStart"
+      @dragend="handleDragEnd"
       @contextmenu.prevent="handleContextMenu"
     >
       <div v-if="shownStars.length > 0" class="rating-indicator" aria-label="Item rating">
