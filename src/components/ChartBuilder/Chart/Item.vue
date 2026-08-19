@@ -312,15 +312,22 @@ function deleteItem() {
     :key="props.item ? props.item.coverURL : props.index"
     :class="`item ${props.item ? '' : 'placeholder'} ${isFocusedTile ? 'focused' : ''} ${isDimmed ? 'dimmed' : ''}`"
     :data-index="props.index"
-    :draggable="props.item ? 'true' : 'false'"
     :style="props.item ? itemStyle : { ...itemStyle, ...imgStyle }"
     @click="handleTileClick"
     @contextmenu.prevent="handleContextMenu"
-    @dragstart="handleDragStart"
     @dragover="allowDrop"
     @drop="handleDrop"
   >
-    <div :class="`cover-frame ${isActiveTile ? 'active-tile' : ''}`" :style="coverFrameStyle">
+    <!-- The cover is the drag handle rather than the whole tile, so the title
+    below stays selectable. Text inside a draggable element can't be selected -
+    a mousedown-drag there starts a drag instead. Drops still land anywhere on
+    the tile. -->
+    <div
+      :class="`cover-frame ${isActiveTile ? 'active-tile' : ''}`"
+      :style="coverFrameStyle"
+      :draggable="props.item ? 'true' : 'false'"
+      @dragstart="handleDragStart"
+    >
       <div v-if="shownStars.length > 0" class="rating-indicator" aria-label="Item rating">
         <span
           v-for="star in shownStars"
@@ -497,6 +504,9 @@ function deleteItem() {
 }
 
 .item-title {
+  /* Selectable for copying, but never editable - editing stays in the sidebar. */
+  user-select: text;
+  cursor: text;
   margin: 0;
   font-size: 0.62rem;
   line-height: 1.2;

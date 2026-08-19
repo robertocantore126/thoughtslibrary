@@ -442,16 +442,21 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
 <template>
   <div
     class="layer-tile"
-    :draggable="!isParent"
     :style="itemStyle"
     @click="handleTileClick"
     @contextmenu.prevent="handleContextMenu"
-    @dragstart="handleDragStart"
-    @dragend="emit('dragStateChange', false)"
     @dragover="allowDrop"
     @drop="handleDrop"
   >
-    <div :class="`cover-frame ${isSelected ? 'active-tile' : ''}`" :style="coverFrameStyle">
+    <!-- Drag by the cover, not the whole tile, so the title below stays
+    selectable. See the matching note in Item.vue. -->
+    <div
+      :class="`cover-frame ${isSelected ? 'active-tile' : ''}`"
+      :style="coverFrameStyle"
+      :draggable="!isParent"
+      @dragstart="handleDragStart"
+      @dragend="emit('dragStateChange', false)"
+    >
       <div v-if="shownStars.length > 0" class="rating-indicator" aria-label="Item rating">
         <span
           v-for="star in shownStars"
@@ -709,6 +714,9 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
 }
 
 .item-title {
+  /* Selectable for copying, but never editable - editing stays in the sidebar. */
+  user-select: text;
+  cursor: text;
   margin: 0;
   font-size: 0.62rem;
   line-height: 1.2;
