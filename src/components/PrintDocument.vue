@@ -118,19 +118,22 @@ function toBlock(item: ChartItem, coord: string): TextBlock {
 // the layer's cells and a text block per tile; tiles without one become a
 // single text block.
 const entries = computed<Entry[]>(() => {
-  const coordinates = props.chart.coordinates || {}
   const layers = props.chart.relatedLayers || {}
+  const width = props.chart.size.x
   const result: Entry[] = []
 
-  for (const item of props.chart.items) {
+  // The coordinate comes from the index, not from a lookup in `coordinates`.
+  // `items` is built by itemsFromCoordinates at exactly (y-1)*width + (x-1), so
+  // the index IS the position. Searching `coordinates` by object identity used
+  // to be the way, and it silently matched nothing: asset inlining clones
+  // `items` and `coordinates` separately, so the two never share an object and
+  // every tile was skipped, leaving the PDF with only its chart image.
+  props.chart.items.forEach((item, index) => {
     if (!item) {
-      continue
+      return
     }
 
-    const key = Object.entries(coordinates).find(([, value]) => value === item)?.[0]
-    if (!key) {
-      continue
-    }
+    const key = `${(index % width) + 1},${Math.floor(index / width) + 1}`
 
     const layer = layers[item.id]
     const hasLayer = !!layer && Object.keys(layer).length > 0
@@ -184,7 +187,7 @@ const entries = computed<Entry[]>(() => {
         rows: maxY - minY + 1,
       },
     })
-  }
+  })
 
   return result
 })

@@ -2,7 +2,7 @@
 
 // Functions related to importing and exporting charts
 
-import type { ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } from '../types'
+import type { Chart, ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } from '../types'
 import { createApp } from 'vue'
 import { backendBaseUrl } from '../api/config'
 import PrintDocument from '../components/PrintDocument.vue'
@@ -12,6 +12,18 @@ import { inlineStoredChartAssets, inlineStoredImageUrl, isLocalAssetUrl, persist
 import { forceRefresh } from './chart'
 import { ensureWritePermission, getRememberedFileHandle, rememberFileHandle, type StoredFileHandle } from './fileHandles'
 import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
+
+// The live Pinia store is the source of truth. Reading the chart back out of
+// localStorage races the debounced write in LocalStorageWatcher, so a save or
+// export issued right after typing would capture the previous version.
+function getActiveChartForOutput(): StoredChart {
+  const stored = getActiveChart()
+
+  return {
+    timestamp: stored?.timestamp ?? Date.now(),
+    data: useStore().chart,
+  }
+}
 
 function getWindowApi() {
   return (window as Window & typeof globalThis & {
@@ -113,7 +125,7 @@ function base64ToBytes(text: string): Uint8Array {
 
 export async function exportCurrentChart() {
   const uuid = getActiveChartUuid()
-  const activeChart = await inlineStoredChartAssets(getActiveChart())
+  const activeChart = await inlineStoredChartAssets(getActiveChartForOutput())
 
   const exportObj: StoredCharts = {
     [uuid]: activeChart,
@@ -275,7 +287,7 @@ async function waitForPrintImages(root: HTMLElement) {
 }
 
 export async function exportCurrentChartToPdf() {
-  const activeChart = await inlineStoredChartAssets(getActiveChart())
+  const activeChart = await inlineStoredChartAssets(getActiveChartForOutput())
   const chartTitle = sanitizePdfText(activeChart.data.title) || 'chart'
   const chartElement = document.querySelector('#chart') as HTMLElement | null
 
@@ -402,7 +414,7 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
     }
   }
 
-  const activeChart = await inlineStoredChartAssets(getActiveChart())
+  const activeChart = await inlineStoredChartAssets(getActiveChartForOutput())
 
   const exportObj: StoredCharts = {
     [uuid]: activeChart,
@@ -521,6 +533,35 @@ export async function parseUploadedText(text: string) {
   return decoded
 }
 
+// A .topster decodes to plain JSON, so a file can parse cleanly and still be
+// structurally wrong. Everything here runs BEFORE the chart is written to
+// storage and made active: previously a malformed chart was persisted and
+// activated first and only then blew up, so the failure repeated on every
+// startup and there was no way back without clearing storage by hand.
+function assertImportableChart(json: unknown, uuid: string | undefined): asserts json is StoredCharts {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    throw new Error('This file does not contain a chart.')
+  }
+
+  if (!uuid) {
+    throw new Error('This file contains no charts.')
+  }
+
+  const entry = (json as Record<string, unknown>)[uuid] as { data?: unknown } | undefined
+  const data = entry?.data as Partial<Chart> | undefined
+
+  if (!data || typeof data !== 'object') {
+    throw new Error('This chart is missing its data and was not imported.')
+  }
+
+  const hasUsableSize = Number.isFinite(Number(data.size?.x)) && Number.isFinite(Number(data.size?.y))
+  const hasUsableContent = Array.isArray(data.items) || (!!data.coordinates && typeof data.coordinates === 'object')
+
+  if (!hasUsableSize || !hasUsableContent) {
+    throw new Error('This chart is malformed and was not imported.')
+  }
+}
+
 export async function importChart(event: Event) {
   const files = (event.target as HTMLInputElement).files
 
@@ -542,6 +583,8 @@ export async function importChart(event: Event) {
     const json = JSON.parse(results) as StoredCharts
 
     const newChartUuid = Object.keys(json)[0]
+    assertImportableChart(json, newChartUuid)
+
     const existingChart = findByUuid(newChartUuid)
     const newChart = json[newChartUuid] as StoredPremigrationChart
 

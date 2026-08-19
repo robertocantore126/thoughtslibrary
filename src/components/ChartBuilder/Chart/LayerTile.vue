@@ -22,6 +22,7 @@ const emit = defineEmits<{
 
 const store = useStore()
 const BASE_ITEM_SIZE_PX = 130
+let dragImageContainer: HTMLElement | null = null
 const SUPPORTED_IMAGE_EXTENSIONS = /\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$/i
 
 // Canonical direction deltas — must match types.ts Direction.
@@ -239,6 +240,7 @@ function handleDragStart(ev: DragEvent) {
 
     const appEl = document.querySelector('#app')
     appEl?.appendChild(container)
+    dragImageContainer = container
 
     ev.dataTransfer.effectAllowed = 'move'
     ev.dataTransfer.setData('application/json', dragData)
@@ -303,37 +305,13 @@ async function handleDrop(ev: DragEvent) {
   await tryHandleExternalImageDrop(ev)
 }
 
-// Dropping a dragged layer tile onto a + button moves it into that (empty)
-// cell — the only empty cells in a sparse layer that can receive a drop.
-function allowAddButtonDrop(ev: DragEvent, direction: Direction) {
-  if (!isDirectionAvailable(direction)) {
-    return
-  }
-
-  const dragData = parseDragData(ev)
-  if (!isLayerDrag(dragData) || dragData.parentId !== props.parentId) {
-    return
-  }
-
-  ev.preventDefault()
-  if (ev.dataTransfer) {
-    ev.dataTransfer.dropEffect = 'move'
-  }
-}
-
-function handleAddButtonDrop(ev: DragEvent, direction: Direction) {
-  if (!isDirectionAvailable(direction)) {
-    return
-  }
-
-  const dragData = parseDragData(ev)
-  if (!isLayerDrag(dragData) || dragData.parentId !== props.parentId) {
-    return
-  }
-
-  ev.preventDefault()
-  const target = targetOffset(direction)
-  store.moveLayerTile({ parentId: props.parentId, fromOffset: dragData.offset, toOffset: `${target.x},${target.y}` })
+// Releases the offscreen drag image and disarms the overlay's drop targets.
+// Without the removal the container stayed in the document forever, leaking a
+// node and a decoded image on every drag.
+function handleDragEnd() {
+  dragImageContainer?.remove()
+  dragImageContainer = null
+  emit('dragStateChange', false)
 }
 
 function getFileExtension(name: string): string {
@@ -455,7 +433,7 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
       :style="coverFrameStyle"
       :draggable="!isParent"
       @dragstart="handleDragStart"
-      @dragend="emit('dragStateChange', false)"
+      @dragend="handleDragEnd"
       @contextmenu.prevent="handleContextMenu"
     >
       <div v-if="shownStars.length > 0" class="rating-indicator" aria-label="Item rating">
@@ -500,8 +478,6 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
           data-html2canvas-ignore
           @mousedown.stop.prevent
           @click.stop="addTile(d.dir)"
-          @dragover.stop="(ev) => allowAddButtonDrop(ev, d.dir)"
-          @drop.stop="(ev) => handleAddButtonDrop(ev, d.dir)"
         >
           +
         </button>

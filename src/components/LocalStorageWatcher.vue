@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import type { Chart } from '../types'
 import { onMounted } from 'vue'
-import { persistChartAssets } from '../helpers/assets'
+import { collectChartAssetIds, collectUnusedAssets, persistChartAssets } from '../helpers/assets'
 import { initializeFirstRun } from '../helpers/chart'
 import {
   appendChart,
+  findByUuid,
   getActiveChart,
   getActiveChartUuid,
   getStoredCharts,
@@ -12,12 +14,16 @@ import {
   setStoredCharts,
   updateStoredChart,
 } from '../helpers/localStorage'
-import { type State, useStore } from '../store'
+import { useStore } from '../store'
 
 const store = useStore()
 let hasWarnedStorageQuota = false
 let saveTimer: ReturnType<typeof setTimeout> | null = null
-let pendingState: State | null = null
+// A pending write is bound to the uuid it belongs to. Without that pairing,
+// switching charts inside the debounce window cancelled the first chart's write
+// and flushed the second chart's data in its place, losing the edit.
+let pendingUuid: string | null = null
+let pendingChart: Chart | null = null
 
 function isStorageQuotaExceeded(error: unknown): boolean {
   if (!(error instanceof DOMException)) {
@@ -27,23 +33,35 @@ function isStorageQuotaExceeded(error: unknown): boolean {
   return error.name === 'QuotaExceededError' || error.code === 22
 }
 
-function persistState(state: State) {
+// Commits whatever write is pending to the chart it was scheduled for, and
+// clears the timer. Safe to call at any time, including when nothing is pending.
+function flushPendingChartWrite() {
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+
+  const uuid = pendingUuid
+  const chart = pendingChart
+  pendingUuid = null
+  pendingChart = null
+
+  if (uuid && chart) {
+    persistChart(uuid, chart)
+  }
+}
+
+function persistChart(uuid: string, chart: Chart) {
   try {
-    const activeChartUuid = getActiveChartUuid()
-    const activeChart = getActiveChart()
+    const storedChart = uuid ? findByUuid(uuid) : null
 
-    if (activeChart) {
-      const updatedChart = {
-        ...activeChart,
-        data: state.chart,
-      }
-
-      updateStoredChart(updatedChart, activeChartUuid)
+    if (storedChart) {
+      updateStoredChart({ ...storedChart, data: chart }, uuid)
     }
     else {
       const newUuid = appendChart({
         timestamp: new Date().getTime(),
-        data: state.chart,
+        data: chart,
       })
 
       setActiveChart(newUuid)
@@ -78,6 +96,20 @@ onMounted(async () => {
 
   setStoredCharts(Object.fromEntries(normalizedEntries))
 
+  // Reclaim image blobs no chart points at any more. Deleting a tile or a chart
+  // only ever dropped the reference, so without this sweep the blobs stayed in
+  // IndexedDB forever and storage could only ever grow.
+  try {
+    const referenced = new Set<string>()
+    for (const [, chart] of normalizedEntries) {
+      collectChartAssetIds(chart.data, referenced)
+    }
+    await collectUnusedAssets(referenced)
+  }
+  catch (error) {
+    console.error('Could not reclaim unused images:', error)
+  }
+
   const activeChart = getActiveChart()
 
   if (activeChart) {
@@ -93,29 +125,32 @@ onMounted(async () => {
 // keystroke otherwise stringifies the chart on every character. Flush any
 // pending state on unload so the last edit is never lost on close.
 store.$subscribe((_mutation, state) => {
-  pendingState = state
+  const uuid = getActiveChartUuid()
+
+  // The active chart changed while a write was still pending: commit it to the
+  // chart it actually belongs to before this one takes its place.
+  if (pendingUuid && pendingUuid !== uuid) {
+    flushPendingChartWrite()
+  }
+
+  pendingUuid = uuid
+  // The store replaces `chart` wholesale on every mutation, so this reference is
+  // a genuine snapshot rather than a view that will drift.
+  pendingChart = state.chart
 
   if (saveTimer) {
     clearTimeout(saveTimer)
   }
 
-  saveTimer = setTimeout(() => {
-    saveTimer = null
-    pendingState = null
-    persistState(state)
-  }, 300)
-})
+  saveTimer = setTimeout(flushPendingChartWrite, 300)
+  // flush: 'sync' so every mutation is observed as it happens. Pinia's default
+  // ('pre') batches to the render cycle, which collapses "edit chart A" and
+  // "switch to chart B" into a single notification carrying only B's state -
+  // the edit to A would never be seen, let alone written. The 300ms debounce
+  // above still keeps the actual writes rare.
+}, { flush: 'sync' })
 
-window.addEventListener('beforeunload', () => {
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
-  }
-
-  if (pendingState) {
-    persistState(pendingState)
-  }
-})
+window.addEventListener('beforeunload', flushPendingChartWrite)
 </script>
 
 <template>

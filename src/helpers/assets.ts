@@ -6,6 +6,7 @@ const DB_VERSION = 1
 const STORE_NAME = 'images'
 const LOCAL_ASSET_PREFIX = 'local-asset://'
 const objectUrlCache = new Map<string, string>()
+let dbPromise: Promise<IDBDatabase | null> | null = null
 
 function hasIndexedDb(): boolean {
   return typeof indexedDB !== 'undefined'
@@ -60,10 +61,17 @@ function openAssetDb(): Promise<IDBDatabase | null> {
     return Promise.resolve(null)
   }
 
-  return new Promise((resolve, reject) => {
+  // One shared connection for the lifetime of the page. This used to open a new
+  // one on every single read and write and never close any of them.
+  if (dbPromise) {
+    return dbPromise
+  }
+
+  dbPromise = new Promise<IDBDatabase | null>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION)
 
     request.onerror = () => {
+      dbPromise = null
       reject(request.error || new Error('Failed to open asset database'))
     }
 
@@ -75,9 +83,21 @@ function openAssetDb(): Promise<IDBDatabase | null> {
     }
 
     request.onsuccess = () => {
-      resolve(request.result)
+      const db = request.result
+      // A version change elsewhere invalidates this handle; drop it so the next
+      // caller opens a fresh one instead of using a closing connection.
+      db.onclose = () => {
+        dbPromise = null
+      }
+      db.onversionchange = () => {
+        db.close()
+        dbPromise = null
+      }
+      resolve(db)
     }
   })
+
+  return dbPromise
 }
 
 function extractAssetId(url: string): string | null {
@@ -236,6 +256,68 @@ async function inlineChartItemAssets(item: ChartItem): Promise<ChartItem> {
     coverURL: await inlineStoredImageUrl(item.coverURL),
     attachmentURL: await inlineStoredImageUrl(item.attachmentURL),
   })
+}
+
+// Every local-asset id a chart still points at, across the grid, the flat items
+// array and every related layer.
+export function collectChartAssetIds(chart: Chart, into: Set<string> = new Set()): Set<string> {
+  const visit = (item?: ChartItem | null) => {
+    if (!item) {
+      return
+    }
+    for (const url of [item.coverURL, item.attachmentURL]) {
+      const id = url ? extractAssetId(url) : null
+      if (id) {
+        into.add(id)
+      }
+    }
+  }
+
+  chart.items?.forEach(visit)
+  Object.values(chart.coordinates || {}).forEach(visit)
+  Object.values(chart.relatedLayers || {}).forEach(layer => Object.values(layer).forEach(visit))
+
+  return into
+}
+
+// Deletes every stored blob no longer referenced by any chart, and releases the
+// object URLs handed out for them. Deleting a tile or a chart only ever removed
+// the reference, so the blobs accumulated forever with no way to reclaim them.
+export async function collectUnusedAssets(referencedIds: Set<string>): Promise<number> {
+  const db = await openAssetDb()
+  if (!db) {
+    return 0
+  }
+
+  const storedIds = await new Promise<string[]>((resolve) => {
+    const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAllKeys()
+    request.onsuccess = () => resolve((request.result as IDBValidKey[]).map(String))
+    request.onerror = () => resolve([])
+  })
+
+  const stale = storedIds.filter(id => !referencedIds.has(id))
+  if (stale.length === 0) {
+    return 0
+  }
+
+  await new Promise<void>((resolve) => {
+    const transaction = db.transaction(STORE_NAME, 'readwrite')
+    const store = transaction.objectStore(STORE_NAME)
+    stale.forEach(id => store.delete(id))
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => resolve()
+    transaction.onabort = () => resolve()
+  })
+
+  for (const id of stale) {
+    const objectUrl = objectUrlCache.get(id)
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl)
+      objectUrlCache.delete(id)
+    }
+  }
+
+  return stale.length
 }
 
 export async function persistChartAssets(chart: Chart): Promise<Chart> {

@@ -821,11 +821,17 @@ export const useStore = defineStore('store', {
       this.chart = { ...this.chart, roundCorners: newValue }
     },
     setEntireChart(payload: Chart) {
-      const width = clampDimension(payload.size.x)
-      const height = clampDimension(payload.size.y)
-      const baseCoordinates = payload.coordinates
+      // Charts arrive from imported files and from storage that an older or
+      // broken build may have written, so nothing here can be assumed present.
+      // A missing size used to throw, and since the caller had already persisted
+      // and activated the chart, the same throw repeated on every startup and
+      // left the app unable to load at all.
+      const width = clampDimension(Number(payload?.size?.x) || DEFAULT_CHART_SIZE.x)
+      const height = clampDimension(Number(payload?.size?.y) || DEFAULT_CHART_SIZE.y)
+      const payloadItems = Array.isArray(payload?.items) ? payload.items : []
+      const baseCoordinates = payload?.coordinates
         ? { ...payload.coordinates }
-        : coordinatesFromItems(payload.items, width)
+        : coordinatesFromItems(payloadItems, width)
       const coordinates = normalizeCoordinates(mergeLegacyNotesIntoCoordinates(baseCoordinates, payload.tileNotes))
       const relatedLayers = normalizeRelatedLayers(payload.relatedLayers)
 

@@ -32,12 +32,31 @@ function importTopsters2ChartsPicked(e) {
   topsters2ImportRef.value.click()
 }
 
+// A file input fires `change` only when the selection actually changes, so
+// re-picking the same path is silently ignored — no event, no error, nothing at
+// all. Clearing the value after each pick makes the next one register even when
+// it is the same file, which is the normal case now that saving writes back to
+// the same path every time.
 function importTopsters2Charts(event) {
-  importTopsters2(event)
+  try {
+    importTopsters2(event)
+  }
+  finally {
+    if (topsters2ImportRef.value) {
+      topsters2ImportRef.value.value = ''
+    }
+  }
 }
 
 async function callImportCharts(event) {
-  await importChart(event)
+  try {
+    await importChart(event)
+  }
+  finally {
+    if (uploadRef.value) {
+      uploadRef.value.value = ''
+    }
+  }
 }
 
 // Both save paths stay silent on success and loud on failure, matching Ctrl+S.
