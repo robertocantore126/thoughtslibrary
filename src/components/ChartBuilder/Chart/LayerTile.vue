@@ -15,6 +15,11 @@ const props = defineProps<{
   isParent?: boolean
 }>()
 
+// Lets the overlay arm its empty-cell drop targets only while a drag is live.
+const emit = defineEmits<{
+  dragStateChange: [dragging: boolean]
+}>()
+
 const store = useStore()
 const BASE_ITEM_SIZE_PX = 130
 const SUPPORTED_IMAGE_EXTENSIONS = /\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$/i
@@ -216,6 +221,7 @@ function handleDragStart(ev: DragEvent) {
 
   // Same as the grid tiles: the popup is anchored, so drop it on drag start.
   store.closeNotesPopup()
+  emit('dragStateChange', true)
 
   if (ev.dataTransfer) {
     const dragData = JSON.stringify({ parentId: props.parentId, offset: props.offset })
@@ -431,6 +437,7 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
     @click="handleTileClick"
     @contextmenu.prevent="handleContextMenu"
     @dragstart="handleDragStart"
+    @dragend="emit('dragStateChange', false)"
     @dragover="allowDrop"
     @drop="handleDrop"
   >

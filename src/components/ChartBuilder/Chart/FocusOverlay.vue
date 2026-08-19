@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useStore } from '../../../store'
 import LayerTile from './LayerTile.vue'
 
 const store = useStore()
+
+// True while a layer tile is mid-drag. The empty-cell drop targets below are
+// inert until then, so they never swallow the backdrop clicks that exit focus.
+const isDraggingLayerTile = ref(false)
 
 const isFocusMode = computed(() => !!store.focusedTileId)
 const focusedTileId = computed(() => store.focusedTileId || '')
@@ -37,6 +41,67 @@ const layerEntries = computed(() => {
     .filter(([offset]) => offset !== '0,0')
     .map(([offset, item]) => ({ offset, item }))
 })
+
+// Every empty in-bounds cell of the layer, as a drop target for moving a tile.
+// The + buttons can't serve this: they only appear on :hover, and hover states
+// are suppressed for the whole duration of an HTML5 drag, so during a move they
+// are both invisible and unable to receive the drop.
+const emptyOffsets = computed(() => {
+  const parent = focusedTileCoord.value
+  if (!parent) {
+    return []
+  }
+
+  const occupied = new Set(['0,0', ...layerEntries.value.map(entry => entry.offset)])
+  const offsets: string[] = []
+
+  for (let y = 1; y <= store.chart.size.y; y += 1) {
+    for (let x = 1; x <= store.chart.size.x; x += 1) {
+      const key = `${x - parent.x},${y - parent.y}`
+      if (!occupied.has(key)) {
+        offsets.push(key)
+      }
+    }
+  }
+
+  return offsets
+})
+
+function handleDropCellDragOver(event: DragEvent) {
+  if (!isDraggingLayerTile.value || !event.dataTransfer) {
+    return
+  }
+
+  event.preventDefault()
+  event.dataTransfer.dropEffect = 'move'
+}
+
+function handleDropCellDrop(event: DragEvent, offset: string) {
+  event.preventDefault()
+  isDraggingLayerTile.value = false
+
+  let dragData: { parentId?: unknown, offset?: unknown } | null = null
+  try {
+    dragData = JSON.parse(event.dataTransfer?.getData('application/json') || 'null')
+  }
+  catch {
+    return
+  }
+
+  if (typeof dragData?.parentId !== 'string' || typeof dragData?.offset !== 'string') {
+    return
+  }
+
+  if (dragData.parentId !== focusedTileId.value) {
+    return
+  }
+
+  store.moveLayerTile({
+    parentId: dragData.parentId,
+    fromOffset: dragData.offset,
+    toOffset: offset,
+  })
+}
 
 const hostStyle = reactive({ left: 0, top: 0, width: 0, height: 0 })
 const positions = reactive<Record<string, { left: number, top: number }>>({})
@@ -92,7 +157,7 @@ function updateGeometry() {
   const hostLeft = vpRect.left
   const hostTop = vpRect.top
 
-  const offsets = ['0,0', ...layerEntries.value.map(entry => entry.offset)]
+  const offsets = ['0,0', ...layerEntries.value.map(entry => entry.offset), ...emptyOffsets.value]
   for (const offset of offsets) {
     const cellRect = getCellRect(offset)
     positions[offset] = {
@@ -132,6 +197,24 @@ function handleBackdropClick() {
   }
 
   store.exitFocus()
+}
+
+// Matches BASE_ITEM_SIZE_PX in LayerTile / Item, so a drop cell covers exactly
+// the grid cell beneath it.
+const CELL_SIZE_PX = 130
+
+function dropCellStyle(offset: string): Record<string, string> {
+  const pos = positions[offset]
+  if (!pos) {
+    return { display: 'none' }
+  }
+
+  return {
+    left: `${pos.left}px`,
+    top: `${pos.top}px`,
+    width: `${CELL_SIZE_PX}px`,
+    height: `${CELL_SIZE_PX}px`,
+  }
 }
 
 function handleKeydown(event: KeyboardEvent) {
@@ -187,6 +270,17 @@ onUnmounted(() => {
       @click="handleBackdropClick"
       @contextmenu.prevent="store.exitFocus()"
     />
+    <!-- Drop targets for moving a tile within the layer. Inert until a drag
+    starts, so they don't intercept the backdrop clicks that exit focus. -->
+    <div
+      v-for="offset in emptyOffsets"
+      :key="`empty-${offset}`"
+      class="layer-drop-cell"
+      :class="{ active: isDraggingLayerTile }"
+      :style="dropCellStyle(offset)"
+      @dragover="handleDropCellDragOver"
+      @drop="handleDropCellDrop($event, offset)"
+    />
     <LayerTile
       v-if="parentItem"
       :item="parentItem"
@@ -194,6 +288,7 @@ onUnmounted(() => {
       :parent-id="focusedTileId"
       is-parent
       :style="tileStyle('0,0', 0)"
+      @drag-state-change="isDraggingLayerTile = $event"
     />
     <LayerTile
       v-for="(entry, index) in layerEntries"
@@ -202,6 +297,7 @@ onUnmounted(() => {
       :offset="entry.offset"
       :parent-id="focusedTileId"
       :style="tileStyle(entry.offset, index + 1)"
+      @drag-state-change="isDraggingLayerTile = $event"
     />
   </div>
 </template>
@@ -223,6 +319,23 @@ onUnmounted(() => {
   pointer-events: auto;
   background: rgba(0, 0, 0, 0.45);
   animation: focus-backdrop-in 200ms ease;
+}
+
+.layer-drop-cell {
+  position: absolute;
+  pointer-events: none;
+  border-radius: 4px;
+  z-index: 41;
+}
+
+.layer-drop-cell.active {
+  pointer-events: auto;
+  border: 2px dashed rgba(255, 216, 77, 0.5);
+}
+
+.layer-drop-cell.active:hover {
+  border-color: rgba(255, 216, 77, 0.95);
+  background: rgba(255, 216, 77, 0.12);
 }
 
 @keyframes focus-backdrop-in {
