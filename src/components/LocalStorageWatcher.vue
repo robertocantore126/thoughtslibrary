@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Chart } from '../types'
 import { onMounted } from 'vue'
-import { persistChartAssets } from '../helpers/assets'
+import { collectChartAssetIds, collectUnusedAssets, persistChartAssets } from '../helpers/assets'
 import { initializeFirstRun } from '../helpers/chart'
 import {
   appendChart,
@@ -95,6 +95,20 @@ onMounted(async () => {
   )
 
   setStoredCharts(Object.fromEntries(normalizedEntries))
+
+  // Reclaim image blobs no chart points at any more. Deleting a tile or a chart
+  // only ever dropped the reference, so without this sweep the blobs stayed in
+  // IndexedDB forever and storage could only ever grow.
+  try {
+    const referenced = new Set<string>()
+    for (const [, chart] of normalizedEntries) {
+      collectChartAssetIds(chart.data, referenced)
+    }
+    await collectUnusedAssets(referenced)
+  }
+  catch (error) {
+    console.error('Could not reclaim unused images:', error)
+  }
 
   const activeChart = getActiveChart()
 
