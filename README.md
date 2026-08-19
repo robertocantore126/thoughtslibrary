@@ -54,9 +54,12 @@ Output will be created in `release/`.
 
 ## License
 
-This project is a **modified fork** of [topstersorg](https://github.com/camdendotlol/topstersorg).
+> **Notice:** This repository is a modified fork of [camdendotlol/topstersorg](https://github.com/camdendotlol/topstersorg), originally licensed under AGPL-3.0.
+>
+> Modified in 2026 by [rob126 (robertocantore126)](https://github.com/robertocantore126).
+>
+> Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
-- **Upstream:** <https://github.com/camdendotlol/topstersorg>
-- **License:** the [GNU AGPL-3.0](LICENSE) license applies to the whole work, including this fork's changes. Copyright details are in [NOTICE](NOTICE).
-- **Modified:** 2026, by rob126 (robertocantore126).
-- **Not affiliated:** this project is not affiliated with or endorsed by topsters.org, camdendotlol, or the data providers it uses (Last.fm, OpenLibrary, IGDB, The Movie DB).
+The full license text is in [LICENSE](LICENSE); copyright details are in [NOTICE](NOTICE).
+
+**Not affiliated:** this project is not affiliated with or endorsed by topsters.org, camdendotlol, or the data providers it uses (Last.fm, OpenLibrary, IGDB, The Movie DB).
