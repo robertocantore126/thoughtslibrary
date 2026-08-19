@@ -388,6 +388,20 @@ export async function saveCurrentChartAs(): Promise<string | null> {
 
 async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<string | null> {
   const uuid = getActiveChartUuid()
+
+  // Resolve the browser write target FIRST, before the asset inlining and
+  // compression below. Reusing a stored handle can require requestPermission,
+  // which only works while the page holds transient user activation - and the
+  // Ctrl+S keypress that granted it expires in a few seconds, which that work
+  // can easily outlast on a chart with many images.
+  let writeHandle: StoredFileHandle | null = null
+  if (mode === 'save' && !getWindowApi()?.saveChartFile) {
+    const stored = await getRememberedFileHandle(uuid)
+    if (stored && await ensureWritePermission(stored)) {
+      writeHandle = stored
+    }
+  }
+
   const activeChart = await inlineStoredChartAssets(getActiveChart())
 
   const exportObj: StoredCharts = {
@@ -445,18 +459,14 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
     }
 
     // Browser write-through: reuse the handle this chart was last saved with,
-    // so a plain "save" never reopens the picker. Only for mode 'save' - a
-    // "save as" must always let the user choose a new destination.
-    if (mode === 'save') {
-      const storedHandle = await getRememberedFileHandle(uuid)
-
-      if (storedHandle && await ensureWritePermission(storedHandle)) {
-        const writable = await storedHandle.createWritable()
-        await writable.write(compressed)
-        await writable.close()
-        savedViaHandle = true
-        return { success: true, filePath: storedHandle.name }
-      }
+    // so a plain "save" never reopens the picker. Resolved above, while the
+    // save gesture's user activation was still valid.
+    if (writeHandle) {
+      const writable = await writeHandle.createWritable()
+      await writable.write(compressed)
+      await writable.close()
+      savedViaHandle = true
+      return { success: true, filePath: writeHandle.name }
     }
 
     if (typeof windowWithPicker.showSaveFilePicker === 'function') {
