@@ -444,18 +444,19 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
     class="layer-tile"
     :style="itemStyle"
     @click="handleTileClick"
-    @contextmenu.prevent="handleContextMenu"
     @dragover="allowDrop"
     @drop="handleDrop"
   >
-    <!-- Drag by the cover, not the whole tile, so the title below stays
-    selectable. See the matching note in Item.vue. -->
+    <!-- Drag and right-click belong to the cover, not the whole tile, so the
+    title below stays selectable and keeps its native context menu. See the
+    matching note in Item.vue. -->
     <div
       :class="`cover-frame ${isSelected ? 'active-tile' : ''}`"
       :style="coverFrameStyle"
       :draggable="!isParent"
       @dragstart="handleDragStart"
       @dragend="emit('dragStateChange', false)"
+      @contextmenu.prevent="handleContextMenu"
     >
       <div v-if="shownStars.length > 0" class="rating-indicator" aria-label="Item rating">
         <span

@@ -314,12 +314,12 @@ function deleteItem() {
     :data-index="props.index"
     :style="props.item ? itemStyle : { ...itemStyle, ...imgStyle }"
     @click="handleTileClick"
-    @contextmenu.prevent="handleContextMenu"
     @dragover="allowDrop"
     @drop="handleDrop"
   >
-    <!-- The cover is the drag handle rather than the whole tile, so the title
-    below stays selectable. Text inside a draggable element can't be selected -
+    <!-- The cover is the drag handle and the right-click target rather than the
+    whole tile, so the title below stays selectable and keeps the browser's own
+    context menu for copying. Text inside a draggable element can't be selected -
     a mousedown-drag there starts a drag instead. Drops still land anywhere on
     the tile. -->
     <div
@@ -327,6 +327,7 @@ function deleteItem() {
       :style="coverFrameStyle"
       :draggable="props.item ? 'true' : 'false'"
       @dragstart="handleDragStart"
+      @contextmenu.prevent="handleContextMenu"
     >
       <div v-if="shownStars.length > 0" class="rating-indicator" aria-label="Item rating">
         <span
