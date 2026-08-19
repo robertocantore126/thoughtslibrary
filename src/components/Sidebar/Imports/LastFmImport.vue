@@ -49,6 +49,7 @@ async function importLastFmChart() {
     const coverURL = item.image.find(i => i.size === 'extralarge')['#text']
 
     newItems[idx] = {
+      id: crypto.randomUUID(),
       title: item.name,
       creator: item.artist.name,
       coverURL,

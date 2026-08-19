@@ -176,10 +176,18 @@ async function pasteFromClipboard() {
         class="hidden-file-input"
         @change="onLocalFilePicked"
       >
-      <p class="drop-title">Drop local image here</p>
-      <p class="drop-subtitle">or click to choose JPG, PNG, WEBP</p>
-      <p class="drop-subtitle">Paste with Ctrl+V/Cmd+V</p>
-      <p v-if="localFileName" class="file-name">{{ localFileName }}</p>
+      <p class="drop-title">
+        Drop local image here
+      </p>
+      <p class="drop-subtitle">
+        or click to choose JPG, PNG, WEBP
+      </p>
+      <p class="drop-subtitle">
+        Paste with Ctrl+V/Cmd+V
+      </p>
+      <p v-if="localFileName" class="file-name">
+        {{ localFileName }}
+      </p>
     </div>
     <button @click="pasteFromClipboard">
       Paste image / URL

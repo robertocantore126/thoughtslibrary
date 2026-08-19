@@ -44,7 +44,6 @@ async function handleSearch() {
     }
   }
   catch (error) {
-    // eslint-disable-next-line no-console
     console.error(error)
     alert(`Search failed: ${error}`)
     emit('updateResults', [])

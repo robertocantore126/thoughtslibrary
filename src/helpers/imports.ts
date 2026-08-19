@@ -3,15 +3,14 @@
 // Functions related to importing and exporting charts
 
 import type { ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } from '../types'
+import { createApp } from 'vue'
+import { backendBaseUrl } from '../api/config'
+import PrintDocument from '../components/PrintDocument.vue'
+import { MAX_CHART_DIMENSION } from '../store'
 import { BackgroundTypes } from '../types'
-import { inlineStoredChartAssets, persistChartAssets } from './assets'
+import { inlineStoredChartAssets, inlineStoredImageUrl, isLocalAssetUrl, persistChartAssets } from './assets'
 import { forceRefresh } from './chart'
 import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
-import { markdownToPlainText } from './markdown'
-import { MAX_CHART_DIMENSION } from '../store'
-import { backendBaseUrl } from '../api/config'
-import { inlineStoredImageUrl, isLocalAssetUrl } from './assets'
-import { jsPDF } from 'jspdf'
 
 function getWindowApi() {
   return (window as Window & typeof globalThis & {
@@ -135,8 +134,7 @@ function getPdfExportApi() {
   return (window as Window & typeof globalThis & {
     electronAPI?: {
       printChartToPdf: (payload: {
-        widthPixels: number
-        heightPixels: number
+        html: string
         title: string
       }) => Promise<{
         success: boolean
@@ -154,14 +152,10 @@ async function waitForImageLoad(img: HTMLImageElement) {
   }
 
   await new Promise<void>((resolve) => {
-    const cleanup = () => {
+    const onDone = () => {
       img.removeEventListener('load', onDone)
       img.removeEventListener('error', onDone)
       resolve()
-    }
-
-    const onDone = () => {
-      cleanup()
     }
 
     img.addEventListener('load', onDone, { once: true })
@@ -196,44 +190,49 @@ async function inlineLocalImagesForPdfExport(element: HTMLElement): Promise<() =
   }
 }
 
-function getTilePdfEntries(chart: StoredChart['data']) {
-  const entries = [] as Array<{
-    title: string
-    text: string
-    key: string
-  }>
+// The PDF export builds the chart as a hidden print document and hands it to
+// Chromium: in Electron a hidden window runs `printToPDF` on the serialized
+// HTML; on web the same document is printed with `window.print()`. Only rules
+// naming the `print-doc-*` classes are carried over, so the app's own CSS can
+// never leak into the PDF.
+const PRINT_DOC_BASE_CSS = `
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+`
 
-  const items = chart.items || []
-  const coordinates = chart.coordinates || {}
+// Serialize the print document's styles: everything the PrintDocument
+// component compiled (scoped and plain blocks alike, in dev via injected
+// <style> tags and in production via the extracted CSS files) plus its @page
+// rule. Cross-origin stylesheets (e.g. Google Fonts) are skipped — the print
+// window has no use for them.
+function collectPrintDocumentStyles(): string {
+  const seen = new Set<string>()
+  const rules: string[] = []
 
-  items.forEach((item, index) => {
-    if (!item) {
-      return
+  for (const sheet of Array.from(document.styleSheets)) {
+    let cssRules: CSSRule[]
+    try {
+      cssRules = Array.from(sheet.cssRules)
+    }
+    catch {
+      continue
     }
 
-    const position = Object.entries(coordinates).find(([key, value]) => value === item && key)
-    const tileLabel = position?.[0] || `Tile ${index + 1}`
-    const title = [item.creator, item.title].filter(Boolean).join(' - ') || `Tile ${index + 1}`
-    const text = [item.notes, item.creator && item.title ? undefined : undefined].filter(Boolean).join('')
-    entries.push({
-      key: tileLabel,
-      title,
-      text: sanitizePdfText(markdownToPlainText(item.notes || '')),
-    })
-  })
-
-  return entries
-}
-
-export async function exportCurrentChartToPdf() {
-  const activeChart = await inlineStoredChartAssets(getActiveChart())
-  const chartTitle = sanitizePdfText(activeChart.data.title) || 'chart'
-  const chartElement = document.querySelector('#chart') as HTMLElement | null
-
-  if (!chartElement) {
-    throw new Error('Chart not found')
+    for (const rule of cssRules) {
+      const text = rule.cssText
+      if ((text.includes('print-doc') || text.startsWith('@page')) && !seen.has(text)) {
+        seen.add(text)
+        rules.push(text)
+      }
+    }
   }
 
+  return rules.join('\n')
+}
+
+// Page 1 of the PDF is the chart exactly as the PNG export renders it, so the
+// same html2canvas rasterization is reused (identical options, including the
+// transform-stripping onclone that keeps the full chart in frame).
+async function renderChartImageForPdf(chartElement: HTMLElement): Promise<string> {
   const restoreChartImages = await inlineLocalImagesForPdfExport(chartElement)
   const html2Canvas = await import('html2canvas')
 
@@ -262,49 +261,71 @@ export async function exportCurrentChartToPdf() {
       scale: 2,
     })
 
-    const imgData = canvas.toDataURL('image/png')
-    const pdfWidth = canvas.width
-    const pdfHeight = canvas.height
-    const pdf = new jsPDF({
-      orientation: pdfWidth >= pdfHeight ? 'landscape' : 'portrait',
-      unit: 'px',
-      format: [pdfWidth, pdfHeight],
-    })
-
-    pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight)
-    pdf.addPage('a4', 'portrait')
-
-    pdf.setFontSize(20)
-    pdf.text(`${chartTitle} - Tile text`, 40, 40)
-    pdf.setFontSize(11)
-
-    const entries = getTilePdfEntries(activeChart.data)
-    let y = 70
-    for (const entry of entries) {
-      if (y > 760) {
-        pdf.addPage('a4', 'portrait')
-        y = 40
-      }
-
-      pdf.setFont('helvetica', 'bold')
-      pdf.text(`${entry.key}: ${entry.title}`, 40, y)
-      y += 16
-      if (entry.text) {
-        const splitText = pdf.splitTextToSize(entry.text, 500)
-        pdf.setFont('helvetica', 'normal')
-        pdf.text(splitText, 56, y)
-        y += 16 * splitText.length + 8
-      }
-      else {
-        y += 8
-      }
-    }
-
-    const safeTitle = chartTitle.replace(/[^a-z0-9]+/gi, '-').replace(/(^-|-$)/g, '') || 'chart'
-    pdf.save(`${safeTitle}.pdf`)
+    return canvas.toDataURL('image/png')
   }
   finally {
     restoreChartImages()
+  }
+}
+
+async function waitForPrintImages(root: HTMLElement) {
+  const images = Array.from(root.querySelectorAll('img'))
+  await Promise.all(images.map(waitForImageLoad))
+}
+
+export async function exportCurrentChartToPdf() {
+  const activeChart = await inlineStoredChartAssets(getActiveChart())
+  const chartTitle = sanitizePdfText(activeChart.data.title) || 'chart'
+  const chartElement = document.querySelector('#chart') as HTMLElement | null
+
+  if (!chartElement) {
+    throw new Error('Chart not found')
+  }
+
+  const chartImage = await renderChartImageForPdf(chartElement)
+
+  // Build the hidden print document. It is mounted in the live DOM so the Vue
+  // component's styles are compiled and injected exactly as in the app, then
+  // serialized into a standalone page for the print window (or printed in
+  // place on web, where the print stylesheet hides the app around it).
+  const host = document.createElement('div')
+  host.className = 'print-doc-root'
+  host.id = 'print-host'
+  document.body.appendChild(host)
+
+  const printApp = createApp(PrintDocument, {
+    chart: activeChart.data,
+    chartImage,
+  })
+  printApp.mount(host)
+  await waitForPrintImages(host)
+
+  try {
+    const printApi = getPdfExportApi()?.printChartToPdf
+
+    if (printApi) {
+      // The collected rules are raw CSS text; they must be wrapped in a
+      // <style> tag or the standalone print window would render them as
+      // literal text and the document would come out unstyled.
+      const html = `<style>${PRINT_DOC_BASE_CSS}${collectPrintDocumentStyles()}</style>${host.innerHTML}`
+      const result = await printApi({ html, title: chartTitle })
+
+      if (!result.success) {
+        if ('canceled' in result && result.canceled) {
+          return
+        }
+        throw new Error('error' in result && result.error ? result.error : 'Failed to export PDF')
+      }
+      return
+    }
+
+    // Web fallback: the browser's own print dialog produces the PDF from the
+    // same document.
+    window.print()
+  }
+  finally {
+    printApp.unmount()
+    host.remove()
   }
 }
 
@@ -622,6 +643,7 @@ export async function importTopsters2(event: Event) {
 
             // Create item
             const item: ChartItem = {
+              id: crypto.randomUUID(),
               title: card.title,
               coverURL: card.src,
             }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import FocusOverlay from './Chart/FocusOverlay.vue'
 import Chart from './Chart/index.vue'
 import NotesPopup from './NotesPopup.vue'
 import TopBar from './TopBar.vue'
@@ -11,6 +12,7 @@ import TopBar from './TopBar.vue'
       <Chart />
     </div>
     <NotesPopup />
+    <FocusOverlay />
   </div>
 </template>
 

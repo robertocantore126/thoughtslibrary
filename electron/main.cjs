@@ -1,5 +1,6 @@
-const http = require('node:http')
 const fs = require('node:fs')
+const http = require('node:http')
+const os = require('node:os')
 const path = require('node:path')
 const process = require('node:process')
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron')
@@ -109,30 +110,64 @@ ipcMain.handle('read-chart-file', async (_event, filePath) => {
   }
 })
 
+// The renderer builds the PDF as a standalone HTML print document (the chart
+// raster on page 1, then a mini render plus per-tile text per grid tile). It
+// is loaded into a hidden window and rasterized with Chromium's own print
+// pipeline: vector text, real pagination, @page rules honored. The visible app
+// window is never touched, so its UI CSS can never leak into the PDF.
 ipcMain.handle('print-chart-to-pdf', async (event, payload) => {
-  const win = BrowserWindow.fromWebContents(event.sender)
-
-  if (!win) {
-    return { success: false, error: 'No browser window available' }
+  const html = payload?.html
+  if (typeof html !== 'string' || !html.trim()) {
+    return { success: false, error: 'Missing print document HTML' }
   }
 
+  const printWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      sandbox: true,
+    },
+  })
+
+  let tempDir
   try {
-    const widthMicrons = Math.max(1000, Math.round((payload?.widthPixels || 0) * 25400 / 96))
-    const heightMicrons = Math.max(1000, Math.round((payload?.heightPixels || 0) * 25400 / 96))
-    const pdfBuffer = await win.webContents.printToPDF({
-      pageSize: {
-        width: widthMicrons,
-        height: heightMicrons,
-      },
-      marginsType: 0,
+    // A document with inlined images can be large; write it to a temp file
+    // rather than trusting a multi-megabyte data: URL to load cleanly.
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'thoughtslibrary-print-'))
+    const docPath = path.join(tempDir, 'print.html')
+    fs.writeFileSync(docPath, html, 'utf8')
+
+    await printWindow.loadFile(docPath)
+
+    // Wait for images and fonts to settle before rasterizing; a slow cover
+    // would otherwise come out blank. Bounded so a hung resource cannot wedge
+    // the export.
+    const waitForReady = printWindow.webContents.executeJavaScript(`
+      Promise.all([
+        (document.fonts && document.fonts.ready) || Promise.resolve(),
+        ...Array.from(document.images).map(img =>
+          img.complete
+            ? Promise.resolve()
+            : new Promise(resolve => {
+                img.addEventListener('load', resolve, { once: true })
+                img.addEventListener('error', resolve, { once: true })
+              }),
+        ),
+      ])
+    `)
+    await Promise.race([
+      waitForReady,
+      new Promise(resolve => setTimeout(resolve, 10000)),
+    ])
+
+    const pdfBuffer = await printWindow.webContents.printToPDF({
+      pageSize: 'A4',
       printBackground: true,
-      preferCSSPageSize: false,
-      landscape: false,
+      preferCSSPageSize: true,
     })
 
-    const safeTitle = (payload?.title || 'chart')
+    const safeTitle = String(payload?.title || 'chart')
       .replace(/[^a-z0-9]+/gi, '-')
-      .replace(/(^-|-$)/g, '') || 'chart'
+      .replace(/^-|-$/g, '') || 'chart'
 
     const { canceled, filePath } = await dialog.showSaveDialog({
       defaultPath: `${safeTitle}.pdf`,
@@ -149,6 +184,14 @@ ipcMain.handle('print-chart-to-pdf', async (event, payload) => {
   catch (error) {
     console.error('Failed to export PDF:', error)
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+  }
+  finally {
+    if (printWindow && !printWindow.isDestroyed()) {
+      printWindow.destroy()
+    }
+    if (tempDir) {
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    }
   }
 })
 

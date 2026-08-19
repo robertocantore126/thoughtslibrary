@@ -47,6 +47,9 @@ const chartDimensionMax = MAX_CHART_DIMENSION
       :data-list-step-interval="1"
       @handle-change="store.setHeight"
     />
+    <p v-if="storeRef.resizeBlockMessage.value" class="resize-block-message">
+      {{ storeRef.resizeBlockMessage.value }}
+    </p>
     <div class="separator" aria-hidden />
     <SelectInput
       label="Background Type"
@@ -163,5 +166,12 @@ const chartDimensionMax = MAX_CHART_DIMENSION
 .separator {
   border-top: 1px solid rgba(60, 60, 60, 0.9);
   margin: 4px 0;
+}
+
+.resize-block-message {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: #ff7f50;
 }
 </style>

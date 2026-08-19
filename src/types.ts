@@ -1,4 +1,5 @@
 export interface ChartItem {
+  id: string // NEW — uuid v4, required on every item
   title: string
   creator?: string
   coverURL: string
@@ -7,6 +8,10 @@ export interface ChartItem {
   notes?: string
   rating?: number
 }
+
+// Key is a RELATIVE offset from the parent tile: `${dx},${dy}`.
+// dx > 0 is right, dy > 0 is down. "0,0" is the parent and is never stored.
+export type RelatedLayer = Record<string, ChartItem>
 
 export type ChartCoordinates = Record<string, ChartItem>
 
@@ -36,6 +41,7 @@ export interface Chart {
   title: string
   coordinates?: ChartCoordinates
   tileNotes?: Record<string, string> // legacy support for older saved charts
+  relatedLayers?: Record<string, RelatedLayer> // keyed by parent ChartItem.id
   items: Array<ChartItem | null>
   size: ChartSize
   showNumbers: boolean
@@ -46,6 +52,12 @@ export interface Chart {
   shadows?: boolean
   roundCorners: boolean
 }
+
+export type Direction = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
+
+export type Selection =
+  | { kind: 'tile', key: string } // "x,y" absolute
+  | { kind: 'layer', parentId: string, offset: string } // "dx,dy" relative
 
 export interface IgdbItem {
   name: string
