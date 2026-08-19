@@ -149,6 +149,16 @@ function handleTileClick(event: MouseEvent) {
   store.selectLayerTile({ parentId: props.parentId, offset: props.offset })
 }
 
+// The overlay covers the focused grid tile, so Item.vue's own contextmenu
+// handler can never fire while focus mode is on. Right-clicking the parent
+// here is what actually toggles focus back off. Layer tiles are leaves, so
+// on those we only suppress the native menu.
+function handleContextMenu() {
+  if (props.isParent) {
+    store.exitFocus()
+  }
+}
+
 function deleteLayerTile() {
   if (props.isParent) {
     // The parent is a grid tile: deleting it removes the tile itself and the
@@ -405,6 +415,7 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
     :draggable="!isParent"
     :style="itemStyle"
     @click="handleTileClick"
+    @contextmenu.prevent="handleContextMenu"
     @dragstart="handleDragStart"
     @dragover="allowDrop"
     @drop="handleDrop"

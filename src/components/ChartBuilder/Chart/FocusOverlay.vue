@@ -159,6 +159,13 @@ onUnmounted(() => {
       height: `${hostStyle.height}px`,
     }"
   >
+    <!-- Clicking anywhere that isn't a layer tile leaves focus mode. The tiles
+    are later siblings, so they paint above this and swallow their own clicks. -->
+    <div
+      class="focus-backdrop"
+      @click="store.exitFocus()"
+      @contextmenu.prevent="store.exitFocus()"
+    />
     <LayerTile
       v-if="parentItem"
       :item="parentItem"
@@ -184,5 +191,11 @@ onUnmounted(() => {
   z-index: 40;
   overflow: hidden;
   pointer-events: none;
+}
+
+.focus-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
 }
 </style>
