@@ -85,14 +85,28 @@ const ratingColor = computed(() => {
 function allowDrop(ev: DragEvent) {
   ev.preventDefault()
   if (ev.dataTransfer) {
-    // getData() is unreadable during dragover - the drag data store stays in
-    // protected mode until the drop - so the effect has to come from types and
-    // effectAllowed. handleDrop validates the payload once it can be read; a
-    // layer-tile drag simply finds nothing to do there.
-    const carriesJson = Array.from(ev.dataTransfer.types).includes('application/json')
-    const isTileDrag = carriesJson && ['move', 'copyMove', 'linkMove'].includes(ev.dataTransfer.effectAllowed)
+    const isInternalDrag = Array.from(ev.dataTransfer.types).includes('application/json')
+    let dropEffect: DataTransfer['dropEffect'] = isInternalDrag ? 'move' : 'copy'
 
-    ev.dataTransfer.dropEffect = isTileDrag ? 'move' : 'copy'
+    if (isInternalDrag) {
+      try {
+        const dragData = JSON.parse(ev.dataTransfer.getData('application/json') || 'null')
+
+        // A layer-tile drag never lands on the grid.
+        if (dragData && typeof dragData.parentId === 'string') {
+          dropEffect = 'none'
+        }
+        else if (dragData && Number.isInteger(dragData.originalIndex) && !store.canMoveTile(dragData.originalIndex, props.index)) {
+          // Moving here would push a layer tile out of bounds.
+          dropEffect = 'none'
+        }
+      }
+      catch {
+        // Malformed payload: keep the default effect.
+      }
+    }
+
+    ev.dataTransfer.dropEffect = dropEffect
   }
 }
 

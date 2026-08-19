@@ -17,6 +17,7 @@ export interface State {
   selection: Selection | null
   notesPopupKey: Selection | null
   focusedTileId: string | null
+  resizeBlockMessage: string | null
   // Timestamp of the last successful save to a file. Bumped on every save so a
   // repeated save re-triggers the confirmation, even to the same path.
   lastSavedAt: number | null
@@ -25,18 +26,6 @@ export interface State {
 }
 
 export const MAX_CHART_DIMENSION = 60
-// A layer may extend this many cells from its parent in any direction unless
-// the chart overrides it. 3 gives a 7x7 field, 48 cells around the parent.
-export const DEFAULT_LAYER_REACH = 3
-export const MAX_LAYER_REACH = 12
-
-export function clampLayerReach(value: number): number {
-  if (!Number.isFinite(value)) {
-    return DEFAULT_LAYER_REACH
-  }
-  return Math.max(1, Math.min(MAX_LAYER_REACH, Math.round(value)))
-}
-
 export const MAX_CHART_ITEMS = MAX_CHART_DIMENSION * MAX_CHART_DIMENSION
 const THOUGHT_ICON_URL = '/thought_tile.svg'
 const LEGACY_NOTES_ICON_URL = '/notes_tile.svg'
@@ -130,15 +119,16 @@ function resolveItemAt(chart: Chart, selection: Selection): ChartItem | null {
   return chart.relatedLayers?.[selection.parentId]?.[selection.offset] || null
 }
 
-// A layer is its own coordinate space centred on its parent, bounded only by
-// how far it may reach. Nothing about the chart constrains it, so moving the
-// parent or resizing the chart can never invalidate a layer.
-export function layerReachOf(chart: Chart): number {
-  return clampLayerReach(chart.layerReach ?? DEFAULT_LAYER_REACH)
-}
-
-function isWithinReach(dx: number, dy: number, reach: number): boolean {
-  return Math.abs(dx) <= reach && Math.abs(dy) <= reach
+// True if any tile in the layer would fall outside `size` when the layer's
+// parent sits at `coord`.
+function layerLeavesBounds(layer: RelatedLayer, coord: { x: number, y: number }, size: ChartSize): boolean {
+  for (const offset of Object.keys(layer)) {
+    const delta = parseOffset(offset)
+    if (!isInBounds(coord.x + delta.x, coord.y + delta.y, size)) {
+      return true
+    }
+  }
+  return false
 }
 
 // Produces a new chart with the item at `selection` replaced by
@@ -197,13 +187,65 @@ function chartWithLayers(chart: Chart, layers: Record<string, RelatedLayer>): Ch
   return { ...chart, relatedLayers: layers }
 }
 
-// First unoccupied in-reach offset for the layer, scanning row-major.
-// "0,0" is the parent's own cell and is never stored.
-function firstEmptyLayerOffset(chart: Chart, layer: RelatedLayer): string | null {
-  const reach = layerReachOf(chart)
+// Smallest dimension at which every layer tile still fits, per axis.
+function minDimensionForLayers(chart: Chart, axis: 'x' | 'y'): number {
+  const coordinates = chart.coordinates || {}
+  const layers = chart.relatedLayers
+  if (!layers || Object.keys(layers).length === 0) {
+    return 1
+  }
+  let min = 1
+  for (const [parentId, layer] of Object.entries(layers)) {
+    const parentCoord = findItemCoord(coordinates, parentId)
+    if (!parentCoord) {
+      continue
+    }
+    for (const offset of Object.keys(layer)) {
+      const delta = parseOffset(offset)
+      const absolute = axis === 'x' ? parentCoord.x + delta.x : parentCoord.y + delta.y
+      min = Math.max(min, absolute)
+    }
+  }
+  return Math.min(min, MAX_CHART_DIMENSION)
+}
 
-  for (let dy = -reach; dy <= reach; dy++) {
-    for (let dx = -reach; dx <= reach; dx++) {
+// Titles of the parents whose layers pin the given minimum dimension.
+function blockingParentTitles(chart: Chart, axis: 'x' | 'y', minDimension: number): string[] {
+  const coordinates = chart.coordinates || {}
+  const layers = chart.relatedLayers
+  if (!layers) {
+    return []
+  }
+  const titles: string[] = []
+  for (const [parentId, layer] of Object.entries(layers)) {
+    const parentCoord = findItemCoord(coordinates, parentId)
+    if (!parentCoord) {
+      continue
+    }
+    let maxAbsolute = 0
+    for (const offset of Object.keys(layer)) {
+      const delta = parseOffset(offset)
+      const absolute = axis === 'x' ? parentCoord.x + delta.x : parentCoord.y + delta.y
+      maxAbsolute = Math.max(maxAbsolute, absolute)
+    }
+    if (maxAbsolute >= minDimension) {
+      const parentItem = coordinates[coordKey(parentCoord.x, parentCoord.y)]
+      titles.push(parentItem?.title?.trim() || 'A tile')
+    }
+  }
+  return [...new Set(titles)]
+}
+
+// First unoccupied in-bounds offset for the layer, scanning row-major.
+// "0,0" is the parent's own cell and is never stored.
+function firstEmptyLayerOffset(chart: Chart, parentCoord: { x: number, y: number }, layer: RelatedLayer): string | null {
+  const minDx = -(parentCoord.x - 1)
+  const maxDx = chart.size.x - parentCoord.x
+  const minDy = -(parentCoord.y - 1)
+  const maxDy = chart.size.y - parentCoord.y
+
+  for (let dy = minDy; dy <= maxDy; dy++) {
+    for (let dx = minDx; dx <= maxDx; dx++) {
       if (dx === 0 && dy === 0) {
         continue
       }
@@ -340,6 +382,7 @@ export const initialState = {
   selection: null,
   notesPopupKey: null,
   focusedTileId: null,
+  resizeBlockMessage: null,
   lastSavedAt: null,
   textUndoStack: [],
   isApplyingTextUndo: false,
@@ -501,9 +544,12 @@ export const useStore = defineStore('store', {
         items: itemsFromCoordinates(coords, this.chart.size),
       }
     },
-    // For changing the place of a current item. A layer travels with its parent
-    // and is bounded only by its own reach, so no move can ever strand one.
+    // For changing the place of a current item
     moveItem(payload: { oldIndex: number, newIndex: number }) {
+      if (!this.canMoveTile(payload.oldIndex, payload.newIndex)) {
+        return
+      }
+
       const coords = { ...(this.chart.coordinates || {}) }
       const oldCoord = indexToCoord(payload.oldIndex, this.chart.size.x)
       const newCoord = indexToCoord(payload.newIndex, this.chart.size.x)
@@ -706,28 +752,51 @@ export const useStore = defineStore('store', {
       }
     },
     setHeight(payload: number) {
-      const nextSize = { ...this.chart.size, y: clampDimension(payload) }
+      const requestedHeight = clampDimension(payload)
+      const minHeight = minDimensionForLayers(this.chart, 'y')
+      const blockingTitles = blockingParentTitles(this.chart, 'y', minHeight)
+      const nextHeight = Math.max(requestedHeight, minHeight)
+      const nextSize = { ...this.chart.size, y: nextHeight }
 
       this.chart = {
         ...this.chart,
         size: nextSize,
         items: itemsFromCoordinates(this.chart.coordinates || {}, nextSize),
+      }
+
+      if (nextHeight !== requestedHeight) {
+        const first = blockingTitles[0] || 'A tile'
+        const others = blockingTitles.length - 1
+        this.resizeBlockMessage = others > 0
+          ? `Can't shrink further — ${first} and ${others} others have related tiles in this row`
+          : `Can't shrink further — ${first} has related tiles in this row`
+      }
+      else {
+        this.resizeBlockMessage = null
       }
     },
     setWidth(payload: number) {
-      const nextSize = { ...this.chart.size, x: clampDimension(payload) }
+      const requestedWidth = clampDimension(payload)
+      const minWidth = minDimensionForLayers(this.chart, 'x')
+      const blockingTitles = blockingParentTitles(this.chart, 'x', minWidth)
+      const nextWidth = Math.max(requestedWidth, minWidth)
+      const nextSize = { ...this.chart.size, x: nextWidth }
 
       this.chart = {
         ...this.chart,
         size: nextSize,
         items: itemsFromCoordinates(this.chart.coordinates || {}, nextSize),
       }
-    },
-    // How far related layers may extend from their parent, in cells.
-    setLayerReach(payload: number) {
-      this.chart = {
-        ...this.chart,
-        layerReach: clampLayerReach(payload),
+
+      if (nextWidth !== requestedWidth) {
+        const first = blockingTitles[0] || 'A tile'
+        const others = blockingTitles.length - 1
+        this.resizeBlockMessage = others > 0
+          ? `Can't shrink further — ${first} and ${others} others have related tiles in this column`
+          : `Can't shrink further — ${first} has related tiles in this column`
+      }
+      else {
+        this.resizeBlockMessage = null
       }
     },
     changeGap(newGap: number) {
@@ -773,6 +842,7 @@ export const useStore = defineStore('store', {
       this.selection = null
       this.notesPopupKey = null
       this.focusedTileId = null
+      this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
     },
@@ -781,6 +851,7 @@ export const useStore = defineStore('store', {
       this.selection = null
       this.notesPopupKey = null
       this.focusedTileId = null
+      this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
     },
@@ -804,15 +875,17 @@ export const useStore = defineStore('store', {
     },
     // --- Layer CRUD ---
     addLayerTile(p: { parentId: string, fromOffset: string, direction: Direction }) {
+      const parentCoord = findItemCoord(this.chart.coordinates || {}, p.parentId)
+      if (!parentCoord) {
+        return
+      }
       const delta = DIRECTION_DELTAS[p.direction]
       if (!delta) {
         return
       }
       const from = parseOffset(p.fromOffset)
-      const target = { x: from.x + delta.x, y: from.y + delta.y }
-      const targetOffset = offsetKey(target.x, target.y)
-      // Bounded by the layer's own reach, not by the chart.
-      if (!isWithinReach(target.x, target.y, layerReachOf(this.chart))) {
+      const targetOffset = offsetKey(from.x + delta.x, from.y + delta.y)
+      if (!isInBounds(parentCoord.x + from.x + delta.x, parentCoord.y + from.y + delta.y, this.chart.size)) {
         return
       }
       const layers = { ...(this.chart.relatedLayers || {}) }
@@ -849,6 +922,10 @@ export const useStore = defineStore('store', {
       this.chart = chartWithLayers(this.chart, layers)
     },
     moveLayerTile(p: { parentId: string, fromOffset: string, toOffset: string }) {
+      const parentCoord = findItemCoord(this.chart.coordinates || {}, p.parentId)
+      if (!parentCoord) {
+        return
+      }
       const layers = { ...(this.chart.relatedLayers || {}) }
       const layer = { ...(layers[p.parentId] || {}) }
       const moving = layer[p.fromOffset]
@@ -856,7 +933,7 @@ export const useStore = defineStore('store', {
         return
       }
       const to = parseOffset(p.toOffset)
-      if (!isWithinReach(to.x, to.y, layerReachOf(this.chart))) {
+      if (!isInBounds(parentCoord.x + to.x, parentCoord.y + to.y, this.chart.size)) {
         return
       }
       // Dropping onto an occupied cell swaps the two tiles, the same way
@@ -888,15 +965,19 @@ export const useStore = defineStore('store', {
       this.selection = item ? { kind: 'layer', parentId: p.parentId, offset: p.offset } : null
       this.notesPopupKey = item && item.notes?.trim() ? { kind: 'layer', parentId: p.parentId, offset: p.offset } : null
     },
-    // Fills the focused layer's first empty in-reach cell when focus mode is
+    // Fills the focused layer's first empty in-bounds cell when focus mode is
     // on, otherwise the main grid's first empty cell.
     addItemToActiveTarget(item: ChartItem) {
       const normalized = normalizeChartItem(item)
 
       if (this.focusedTileId) {
+        const parentCoord = findItemCoord(this.chart.coordinates || {}, this.focusedTileId)
+        if (!parentCoord) {
+          return
+        }
         const layers = { ...(this.chart.relatedLayers || {}) }
         const layer = { ...(layers[this.focusedTileId] || {}) }
-        const target = firstEmptyLayerOffset(this.chart, layer)
+        const target = firstEmptyLayerOffset(this.chart, parentCoord, layer)
         if (!target) {
           return
         }
@@ -1035,6 +1116,44 @@ export const useStore = defineStore('store', {
     },
     layerTileCount(state) {
       return (tileId: string): number => Object.keys(state.chart.relatedLayers?.[tileId] || {}).length
+    },
+    canMoveTile(state) {
+      return (oldIndex: number, newIndex: number): boolean => {
+        if (oldIndex === newIndex) {
+          return true
+        }
+        const coordinates = state.chart.coordinates || {}
+        const oldCoord = indexToCoord(oldIndex, state.chart.size.x)
+        const newCoord = indexToCoord(newIndex, state.chart.size.x)
+        const oldKey = coordKey(oldCoord.x, oldCoord.y)
+        const newKey = coordKey(newCoord.x, newCoord.y)
+        const movingItem = coordinates[oldKey]
+        if (!movingItem) {
+          return true
+        }
+        const layers = state.chart.relatedLayers
+        if (!layers) {
+          return true
+        }
+
+        // The moving tile's own layer must fit at the destination.
+        const movingLayer = layers[movingItem.id]
+        if (movingLayer && layerLeavesBounds(movingLayer, newCoord, state.chart.size)) {
+          return false
+        }
+
+        // The swap: the displaced tile moves to the old position, so its
+        // layer must fit there too.
+        const existingAtNew = coordinates[newKey]
+        if (existingAtNew) {
+          const displacedLayer = layers[existingAtNew.id]
+          if (displacedLayer && layerLeavesBounds(displacedLayer, oldCoord, state.chart.size)) {
+            return false
+          }
+        }
+
+        return true
+      }
     },
   },
 })

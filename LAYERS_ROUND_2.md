@@ -1,93 +1,96 @@
-# Related Layers — Round 2 (implemented)
+# Related Layers — Round 2
 
-Round 1 tied a layer to the chart: a layer was a grid the same size as the chart,
-confined to its bounds. Round 2 cuts that tie. **A layer is now its own coordinate
-space centred on its parent, bounded only by how far it may reach.**
-
-An earlier draft of this document proposed a one-cell margin ring around the chart.
-That was superseded: a margin ring only fixed the 8-children-at-an-edge case, and
-left small charts unable to carry large layers. The reach model solves both.
+Changes deferred until after round 1 (`LAYERS_AGENT_BRIEFS.md`) merges. **Do not hand this
+to the round-1 agents.** It amends the frozen contract, and changing that mid-flight is
+exactly what §8 of the briefs warns against.
 
 ---
 
-## R2.1 — Layers are bounded by reach, not by the chart
+## R2.1 — Layer bounds gain a one-cell margin ring
 
-### Rule
+### Problem
+
+Round 1 confines a layer to the chart's own bounds: `1 <= x <= size.x`, `1 <= y <= size.y`.
+
+That makes a tile's full 8-child ring impossible to place near any edge. A tile at column 1
+cannot have west, north-west, or south-west children — those need column 0. A tile at
+column `size.x` cannot have east children. The practical symptom: build a tile with all 8
+children in the middle of the chart, then try to drag it to an edge, and the move guard
+refuses. The cluster becomes stuck in the interior.
+
+### Fix
+
+Widen the layer's coordinate space by one cell on **all four sides**:
 
 ```
--reach <= dx <= reach        -reach <= dy <= reach
+x ∈ [0, size.x + 1]
+y ∈ [0, size.y + 1]
 ```
 
-`Chart.layerReach` holds the value, default `DEFAULT_LAYER_REACH` (3, a 7x7 field
-of 48 cells around the parent), adjustable 1–12 from the **Layer Reach** slider in
-the Options sidebar.
+The layer space is `(size.x + 2) x (size.y + 2)`, with the chart sitting in the middle.
 
-Nothing about the chart constrains a layer any more. A 3x3 chart can carry a
-48-cell layer on every tile, including corner tiles.
+**One ring on each side, not one row or column total.** A single extra column only
+unblocks one edge; drag the tile to the opposite side and it is blocked again. Both
+extremes need covering.
 
-### What this deleted
+This is the minimum that satisfies the requirement, and it satisfies it exactly: a tile
+with all 8 children occupies a 3x3 footprint, so with a one-cell margin it fits centred on
+any cell of the chart, corners included. Clusters extending further than one cell from
+their parent can still be refused near an edge — that is expected and unchanged.
 
-The reach model made three pieces of round-1 machinery unnecessary, because a move
-or resize can no longer strand a layer tile:
+### Where it lands
 
-| Removed | Was |
-|---|---|
-| `canMoveTile` getter | Refused a tile move when it would push a child out of chart bounds, including the swap case |
-| `moveItem` guard | Called the above |
-| `layerLeavesBounds` | Bounds test behind both |
-| `minDimensionForLayers`, `blockingParentTitles` | Computed the resize clamp |
-| Resize clamping in `setWidth` / `setHeight` | Refused to shrink past a layer tile |
-| `resizeBlockMessage` state + its Options display | Explained the clamp |
-| Drag-refusal branch in `Item.vue` `allowDrop` | Signalled a refused move |
+Single bounds predicate in `store.ts`. Everything else reads through it:
 
-`setWidth` / `setHeight` are back to their original one-line form. Shrinking the
-chart to 1x1 leaves every layer untouched.
+- `addLayerTile` — `+` buttons into the margin become legal
+- `canMoveTile` — the guard inherits the wider space
+- `moveLayerTile` — same
+- Agent B's `+` button enable/disable logic — no code change, it already asks the store
 
-### Backward compatibility
+### Careful: the resize clamp
 
-Reach limits **creation and movement only**. Layer tiles already stored outside the
-current reach still render and can still be selected, edited, and moved back inward.
-Nothing is deleted or hidden when reach shrinks, so round-1 charts open intact even
-though they predate the setting.
+`setWidth` / `setHeight` (round 1, step A5) compute the minimum safe dimension from the
+largest absolute x/y occupied by any layer tile. With the margin ring, a tile legitimately
+sitting at `x = 0` or `x = size.x + 1` must **not** be treated as forcing the chart wider.
+
+Subtract the margin when computing the clamp, or resizes that are actually safe will be
+refused. This is the one place where the change is not purely mechanical.
+
+### Capacity
+
+Per layer: `(W+2)(H+2) - 1`. Total across the chart: `(W x H) x ((W+2) x (H+2))`.
+
+| Chart | Round 1 max | Round 2 max |
+|---|---|---|
+| 5 x 5 | 625 | 1,225 |
+| 10 x 10 | 10,000 | 14,400 |
+| 60 x 60 | 12,960,000 | 13,838,400 |
+
+Still a ceiling reachable only by millions of manual clicks. No storage implications.
+
+### Rendering
+
+No new work. `FocusOverlay` mounts in `.chart-builder`, outside `.chart-viewport`'s
+`overflow: auto`, so margin-ring tiles hanging past the chart edge are not clipped. They
+may extend toward the window edge on a chart that fills the pane — acceptable, and worth a
+look once it is running.
+
+### Contract delta
+
+`§1 Shared Context` bullet "Layers are confined to chart bounds" becomes:
+
+> **Layers are confined to chart bounds plus a one-cell margin ring.** A layer tile's
+> absolute position must satisfy `0 <= x <= size.x + 1` and `0 <= y <= size.y + 1`.
+
+No type signatures change. No action signatures change. Agents B and C need no rework —
+B's `+` buttons and drag refusal already delegate to the store, and C reads layer contents
+without caring about bounds.
 
 ---
 
-## R2.2 — Overlay positioning had to change with it
+## R2.2 — Carried over from round 1
 
-`FocusOverlay.getCellRect` used to find a layer cell's screen position by computing
-a grid index and querying `.item[data-index=N]`. That cannot survive round 2:
-
-- Cells outside the chart have no `.item` element at all.
-- Worse, the index arithmetic **wraps**. A cell one column past the right edge
-  resolves to a real element on the next row, so the tile rendered in the wrong
-  place with no error.
-
-Positions are now stepped arithmetically off the parent's own measured cell:
-
-```
-pitchX = parentCell.width  + max(6, gap / 2)     // matches Row.vue's column gap
-pitchY = parentCell.height + gap                 // matches .row-flex's row gap
-```
-
-### Known limitation
-
-Grid rows are not uniform in height — a tile with a two-line title is taller than an
-empty cell — so a single pitch cannot align with every row at once. Layer cells stay
-evenly spaced among themselves and align with the parent exactly, but can drift by
-roughly a line of text per row against distant grid rows.
-
-This is a deliberate trade. The layer is its own space now, and in focus mode the
-chart sits at 0.10 opacity behind a 0.45 dark wash, so alignment with it is barely
-perceptible; internal consistency of the layer is what shows.
-
----
-
-## R2.3 — Carried over, still open
-
-- **The dimmed-export bug.** `.dimmed` is applied to elements inside `#chart`, and
-  neither `downloadChart` (`chart.ts`) nor `renderChartImageForPdf` (`imports.ts`)
-  strips it in their `onclone`. Exporting while focus mode is active bakes the
-  dimming into the PNG and the PDF's first page. Both already strip `.placeholder`
-  the same way, so the fix mirrors existing code.
-- **IndexedDB for chart structure.** Still optional; volumes remain small.
-- **Cross-layer dragging** between the grid and a layer. Still out of scope.
+- **A9, IndexedDB migration** — marked optional in round 1 and skippable. Revisit only if
+  chart JSON actually approaches the localStorage cap.
+- **Cross-layer dragging** — moving tiles between the grid and a layer. Deliberately out of
+  scope in round 1; still undecided.
