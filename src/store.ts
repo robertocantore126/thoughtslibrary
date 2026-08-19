@@ -5,6 +5,7 @@ export interface State {
   chart: Chart
   collapsed: boolean
   activeTileKey: string | null
+  notesPopupKey: string | null
   textUndoStack: TextUndoEntry[]
   isApplyingTextUndo: boolean
 }
@@ -136,6 +137,7 @@ export const initialState = {
   chart: createEmptyChart(),
   collapsed: true,
   activeTileKey: null,
+  notesPopupKey: null,
   textUndoStack: [],
   isApplyingTextUndo: false,
 } as State
@@ -281,6 +283,9 @@ export const useStore = defineStore('store', {
       if (!payload.item && this.activeTileKey === key) {
         this.activeTileKey = null
       }
+      if (!payload.item && this.notesPopupKey === key) {
+        this.notesPopupKey = null
+      }
     },
     // For changing the place of a current item
     moveItem(payload: { oldIndex: number, newIndex: number }) {
@@ -319,9 +324,19 @@ export const useStore = defineStore('store', {
       const key = coordKey(payload.x, payload.y)
       const item = this.chart.coordinates?.[key]
       this.activeTileKey = item ? key : null
+      this.notesPopupKey = item && item.notes?.trim() ? key : null
+    },
+    closeNotesPopup() {
+      this.notesPopupKey = null
+    },
+    openNotesPopup() {
+      if (this.activeTileKey) {
+        this.notesPopupKey = this.activeTileKey
+      }
     },
     clearActiveTile() {
       this.activeTileKey = null
+      this.notesPopupKey = null
     },
     setActiveTileNote(note: string) {
       if (!this.activeTileKey) {
@@ -561,12 +576,14 @@ export const useStore = defineStore('store', {
         items: itemsFromCoordinates(coordinates, { x: width, y: height }),
       }
       this.activeTileKey = null
+      this.notesPopupKey = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
     },
     reset() {
       this.chart = createEmptyChart()
       this.activeTileKey = null
+      this.notesPopupKey = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
     },
@@ -626,6 +643,16 @@ export const useStore = defineStore('store', {
       }
 
       return active.item.notes || ''
+    },
+    notesPopupNote(state): string {
+      if (!state.activeTileKey || state.notesPopupKey !== state.activeTileKey) {
+        return ''
+      }
+
+      return state.chart.coordinates?.[state.activeTileKey]?.notes?.trim() || ''
+    },
+    notesPopupVisible(state): boolean {
+      return !!state.activeTileKey && state.notesPopupKey === state.activeTileKey
     },
     activeTileRating(state): number {
       const active = this.activeTile

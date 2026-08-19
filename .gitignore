@@ -3,6 +3,18 @@ node_modules
 /dist
 /release
 
+# .NET launcher build output
+/launcher/bin/
+/launcher/obj/
+
+# Committed binaries and build artifacts
+*.exe
+*.dll
+*.pdb
+
+# Dev server logs
+devserver*.log
+
 /tests/e2e/videos/
 /tests/e2e/screenshots/
 

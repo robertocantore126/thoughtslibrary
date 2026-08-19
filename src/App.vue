@@ -1,9 +1,44 @@
+<!-- eslint-disable no-alert -->
 <script setup lang="ts">
+import { onMounted, onUnmounted } from 'vue'
 import ChartBuilder from './components/ChartBuilder/index.vue'
 import LocalStorageWatcher from './components/LocalStorageWatcher.vue'
 import Sidebar from './components/Sidebar/index.vue'
 import TitlesSidebar from './components/TitlesSidebar.vue'
+import { saveCurrentChartToFile } from './helpers/imports'
 import './global.css'
+
+async function saveChartFromHotkey() {
+  try {
+    const savedPath = await saveCurrentChartToFile()
+
+    if (savedPath) {
+      alert(`Chart saved to ${savedPath}`)
+    }
+  }
+  catch (error) {
+    console.error(error)
+    alert(`Failed to save chart: ${error}`)
+  }
+}
+
+function handleSaveHotkey(event: KeyboardEvent) {
+  const isSave = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's'
+  if (!isSave) {
+    return
+  }
+
+  event.preventDefault()
+  void saveChartFromHotkey()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleSaveHotkey)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleSaveHotkey)
+})
 </script>
 
 <template>
