@@ -256,20 +256,20 @@ function allowDrop(ev: DragEvent) {
     return
   }
 
-  let dropEffect: DataTransfer['dropEffect'] = 'copy'
-  if (Array.from(dataTransfer.types).includes('application/json')) {
-    const dragData = parseDragData(ev)
-    if (isLayerDrag(dragData)) {
-      dropEffect = !props.isParent && dragData.parentId === props.parentId ? 'move' : 'none'
-    }
-    else if (dragData && Number.isInteger(dragData.originalIndex)) {
-      dropEffect = 'none'
-    }
-    else if (dragData && isChartItem(dragData.item)) {
-      dropEffect = 'copy'
-    }
-  }
-  dataTransfer.dropEffect = dropEffect
+  // getData() is unreadable here: the drag data store stays in protected mode
+  // until the drop event, so the payload cannot be inspected during dragover.
+  // Only types and effectAllowed are available, and reporting an effect the
+  // source did not allow - 'copy' against an effectAllowed of 'move' - makes
+  // the browser reject the drop outright. handleDrop does the real validation,
+  // once the payload is actually readable.
+  const carriesJson = Array.from(dataTransfer.types).includes('application/json')
+  // Tile drags set effectAllowed 'move' at dragstart; search-result drags leave
+  // it uninitialized, so they still read as a copy and show the right cursor.
+  const isTileDrag = carriesJson && ['move', 'copyMove', 'linkMove'].includes(dataTransfer.effectAllowed)
+
+  // The parent is a grid tile, not a layer member, so it takes no tile drags.
+  // Answering 'copy' to a move-only drag is what refuses it.
+  dataTransfer.dropEffect = isTileDrag && !props.isParent ? 'move' : 'copy'
 }
 
 async function handleDrop(ev: DragEvent) {
