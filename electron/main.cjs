@@ -62,7 +62,13 @@ ipcMain.handle('save-chart-file', async (_event, payload) => {
   }
 
   try {
-    if (payload.filePath) {
+    // Write-through is ONLY allowed for an explicit plain "save" that carries a
+    // non-empty path (a path the renderer remembered for this exact chart).
+    // Anything else - "save-as", a missing path, an unknown mode - must show the
+    // dialog, so a remembered path can never silently overwrite the wrong file.
+    const writeThrough = payload.mode === 'save' && typeof payload.filePath === 'string' && payload.filePath.length > 0
+
+    if (writeThrough) {
       fs.writeFileSync(payload.filePath, payload.content, 'utf8')
       return { success: true, filePath: payload.filePath }
     }

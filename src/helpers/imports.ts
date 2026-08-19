@@ -6,13 +6,11 @@ import type { ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } fr
 import { BackgroundTypes } from '../types'
 import { inlineStoredChartAssets, persistChartAssets } from './assets'
 import { forceRefresh } from './chart'
-import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, migrateChart, setActiveChart, updateStoredChart } from './localStorage'
+import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
 import { MAX_CHART_DIMENSION } from '../store'
 import { backendBaseUrl } from '../api/config'
 import { inlineStoredImageUrl, isLocalAssetUrl } from './assets'
 import { jsPDF } from 'jspdf'
-
-const LAST_CHART_FILE_PATH_KEY = 'lastChartFilePath'
 
 function getWindowApi() {
   return (window as Window & typeof globalThis & {
@@ -21,26 +19,16 @@ function getWindowApi() {
         filePath?: string
         suggestedName?: string
         content: string
+        mode: 'save' | 'save-as'
       }) => Promise<{
         success: boolean
         canceled?: boolean
         filePath?: string
         error?: string
       }>
+      getPathForFile?: (file: File) => string
     }
   }).electronAPI
-}
-
-function getLastChartFilePath() {
-  return window.localStorage.getItem(LAST_CHART_FILE_PATH_KEY) || ''
-}
-
-function rememberChartFilePath(filePath: string) {
-  if (!filePath) {
-    return
-  }
-
-  window.localStorage.setItem(LAST_CHART_FILE_PATH_KEY, filePath)
 }
 
 function normalizeChartTitle(title: string) {
@@ -314,7 +302,20 @@ export async function exportCurrentChartToPdf() {
   }
 }
 
-export async function saveCurrentChartToFile(filePath?: string) {
+type SaveChartMode = 'save' | 'save-as'
+
+// Saves the active chart to its own remembered path (if it has one).
+// Returns the resolved file path on success, or null if the user canceled.
+export async function saveCurrentChartToFile(): Promise<string | null> {
+  return saveChartToFile({ mode: 'save' })
+}
+
+// Always shows the save dialog, even if this chart has a remembered path.
+export async function saveCurrentChartAs(): Promise<string | null> {
+  return saveChartToFile({ mode: 'save-as' })
+}
+
+async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<string | null> {
   const uuid = getActiveChartUuid()
   const activeChart = await inlineStoredChartAssets(getActiveChart())
 
@@ -327,14 +328,21 @@ export async function saveCurrentChartToFile(filePath?: string) {
   const zlibbed = await zlib(arr)
   const compressed = bytesToBase64(zlibbed)
 
+  // Only a plain "save" may reuse this chart's own remembered path. "Save As"
+  // always goes through the dialog, and the main process is told which mode
+  // this is so it never silently overwrites a file it wasn't explicitly asked to.
+  const rememberedPath = getRememberedChartFilePath(uuid)
+  const filePath = mode === 'save' && rememberedPath ? rememberedPath : undefined
+
   const result = await (async () => {
     const api = getWindowApi()
 
     if (api?.saveChartFile) {
       return api.saveChartFile({
-        filePath: filePath || getLastChartFilePath() || undefined,
+        filePath,
         suggestedName: `${normalizeChartTitle(activeChart.data.title)}.topster`,
         content: compressed,
+        mode,
       })
     }
 
@@ -375,14 +383,17 @@ export async function saveCurrentChartToFile(filePath?: string) {
 
   if (!result.success) {
     if ('canceled' in result && result.canceled) {
-      return false
+      return null
     }
 
     throw new Error('error' in result ? result.error : 'Failed to save chart file')
   }
 
-  rememberChartFilePath('filePath' in result ? result.filePath || '' : '')
-  return true
+  const savedPath = 'filePath' in result ? result.filePath || '' : ''
+  if (savedPath) {
+    rememberChartFilePath(uuid, savedPath)
+  }
+  return savedPath || null
 }
 
 export async function parseUploadedText(text: string) {
@@ -401,11 +412,18 @@ export async function importChart(event: Event) {
   try {
     const text = await files[0].text()
     const results = await parseUploadedText(text)
-    const importedFilePath = (files[0] as File & { path?: string }).path
 
-    if (importedFilePath) {
-      rememberChartFilePath(importedFilePath)
+    // Resolve the picked file's real on-disk path. Electron 32 removed File.path;
+    // webUtils.getPathForFile (exposed through the preload) is the replacement.
+    // Only available in the desktop build, and only for files picked from disk.
+    let importedFilePath: string | undefined
+    try {
+      importedFilePath = getWindowApi()?.getPathForFile?.(files[0])
     }
+    catch (error) {
+      console.warn('Could not resolve imported file path:', error)
+    }
+
     const json = JSON.parse(results) as StoredCharts
 
     const newChartUuid = Object.keys(json)[0]
@@ -433,6 +451,11 @@ export async function importChart(event: Event) {
     }
 
     if (overwriteConsent) {
+      // Remember the imported file's path for this specific chart so a
+      // subsequent "Save current chart" writes back to the same file.
+      if (importedFilePath) {
+        rememberChartFilePath(newChartUuid, importedFilePath)
+      }
       alert(`"${newChart.data.title}" imported successfully!`)
     }
   }

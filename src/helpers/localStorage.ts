@@ -3,6 +3,34 @@
 import { v4 as uuidv4 } from 'uuid'
 import { BackgroundTypes, type OldStoredChart, type StoredChart, type StoredCharts, type StoredPremigrationChart } from '../types'
 
+// The last path a chart was saved to, remembered per chart UUID so one
+// chart's file can never be silently reused as another chart's save target.
+const LAST_CHART_FILE_PATH_KEY_PREFIX = 'lastChartFilePath:'
+
+export function getRememberedChartFilePath(uuid: string): string {
+  if (!uuid) {
+    return ''
+  }
+
+  return localStorage.getItem(`${LAST_CHART_FILE_PATH_KEY_PREFIX}${uuid}`) || ''
+}
+
+export function rememberChartFilePath(uuid: string, filePath: string): void {
+  if (!uuid || !filePath) {
+    return
+  }
+
+  localStorage.setItem(`${LAST_CHART_FILE_PATH_KEY_PREFIX}${uuid}`, filePath)
+}
+
+export function forgetChartFilePath(uuid: string): void {
+  if (!uuid) {
+    return
+  }
+
+  localStorage.removeItem(`${LAST_CHART_FILE_PATH_KEY_PREFIX}${uuid}`)
+}
+
 export function setActiveChart(uuid: string) {
   localStorage.setItem('activeChart', uuid)
 
@@ -28,6 +56,9 @@ export function destroyChart(uuid: string) {
 
   delete charts[uuid]
   setStoredCharts(charts)
+
+  // Don't leave a stale remembered path behind for a deleted chart.
+  forgetChartFilePath(uuid)
 }
 
 export function getUuids() {
