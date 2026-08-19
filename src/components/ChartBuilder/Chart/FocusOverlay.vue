@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useStore } from '../../../store'
+import { layerReachOf, useStore } from '../../../store'
 import LayerTile from './LayerTile.vue'
 
 const store = useStore()
@@ -47,17 +47,19 @@ const layerEntries = computed(() => {
 // are suppressed for the whole duration of an HTML5 drag, so during a move they
 // are both invisible and unable to receive the drop.
 const emptyOffsets = computed(() => {
-  const parent = focusedTileCoord.value
-  if (!parent) {
+  if (!focusedTileCoord.value) {
     return []
   }
 
   const occupied = new Set(['0,0', ...layerEntries.value.map(entry => entry.offset)])
+  const reach = layerReachOf(store.chart)
   const offsets: string[] = []
 
-  for (let y = 1; y <= store.chart.size.y; y += 1) {
-    for (let x = 1; x <= store.chart.size.x; x += 1) {
-      const key = `${x - parent.x},${y - parent.y}`
+  // The layer is its own space around the parent, so this spans the reach
+  // rather than the chart's cells.
+  for (let dy = -reach; dy <= reach; dy += 1) {
+    for (let dx = -reach; dx <= reach; dx += 1) {
+      const key = `${dx},${dy}`
       if (!occupied.has(key)) {
         offsets.push(key)
       }
@@ -116,23 +118,47 @@ function parseOffset(offset: string): { x: number, y: number } {
   return { x, y }
 }
 
-function getCellRect(offset: string): { left: number, top: number } {
-  const parent = focusedTileCoord.value
-  if (!parent) {
-    return { left: 0, top: 0 }
+// The parent's own grid cell is the anchor, and every other cell is stepped off
+// it arithmetically. Looking each cell up by grid index cannot work any more: a
+// layer reaches past the chart, where no `.item` element exists, and worse, the
+// index arithmetic wraps - a cell one column past the right edge resolves to a
+// real element on the next row, silently placing the tile in the wrong spot.
+function getLayerOrigin(): { left: number, top: number, pitchX: number, pitchY: number } | null {
+  const index = focusedTileIndex.value
+  if (index < 0) {
+    return null
   }
 
-  const { x, y } = parseOffset(offset)
-  const absX = parent.x + x
-  const absY = parent.y + y
-  const index = (absY - 1) * store.chart.size.x + (absX - 1)
   const cell = document.querySelector(`.item[data-index="${index}"]`)
   if (!cell) {
-    return { left: 0, top: 0 }
+    return null
   }
 
   const rect = cell.getBoundingClientRect()
-  return { left: rect.left, top: rect.top }
+  const gap = store.chart.gap
+
+  return {
+    left: rect.left,
+    top: rect.top,
+    // Matches Row.vue: columns are separated by max(6, gap / 2), rows by gap.
+    // Taking the height from the parent's own cell keeps the layer aligned with
+    // the grid wherever titles wrap to the same number of lines.
+    pitchX: rect.width + Math.max(6, gap / 2),
+    pitchY: rect.height + gap,
+  }
+}
+
+function getCellRect(offset: string): { left: number, top: number } | null {
+  const origin = getLayerOrigin()
+  if (!origin) {
+    return null
+  }
+
+  const { x, y } = parseOffset(offset)
+  return {
+    left: origin.left + x * origin.pitchX,
+    top: origin.top + y * origin.pitchY,
+  }
 }
 
 // Anchors every layer tile to the exact bounding box of the grid cell beneath
@@ -160,6 +186,10 @@ function updateGeometry() {
   const offsets = ['0,0', ...layerEntries.value.map(entry => entry.offset), ...emptyOffsets.value]
   for (const offset of offsets) {
     const cellRect = getCellRect(offset)
+    if (!cellRect) {
+      delete positions[offset]
+      continue
+    }
     positions[offset] = {
       left: cellRect.left - hostLeft,
       top: cellRect.top - hostTop,
@@ -230,6 +260,7 @@ watch(
     focusedTileCoord,
     () => store.chart.size,
     () => store.chart.gap,
+    () => store.chart.layerReach,
     () => store.chart.title,
     () => store.chart.showTitles,
     () => store.chart.font,

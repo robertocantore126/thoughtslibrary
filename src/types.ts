@@ -42,6 +42,10 @@ export interface Chart {
   coordinates?: ChartCoordinates
   tileNotes?: Record<string, string> // legacy support for older saved charts
   relatedLayers?: Record<string, RelatedLayer> // keyed by parent ChartItem.id
+  // How far a related layer may extend from its parent, in cells, in any
+  // direction. A layer is its own coordinate space, independent of chart size,
+  // so a small chart can still carry a large layer.
+  layerReach?: number
   items: Array<ChartItem | null>
   size: ChartSize
   showNumbers: boolean

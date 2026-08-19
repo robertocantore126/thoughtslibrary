@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
-import { MAX_CHART_DIMENSION, useStore } from '../../../store'
+import { computed } from 'vue'
+import { DEFAULT_LAYER_REACH, MAX_CHART_DIMENSION, MAX_LAYER_REACH, useStore } from '../../../store'
 import { BackgroundTypes } from '../../../types'
 import ColorInput from './ColorInput.vue'
 import RangeInput from './RangeInput.vue'
@@ -11,6 +12,8 @@ import ToggleInput from './ToggleInput.vue'
 const store = useStore()
 const storeRef = storeToRefs(store)
 const chartDimensionMax = MAX_CHART_DIMENSION
+const layerReachMax = MAX_LAYER_REACH
+const layerReach = computed(() => storeRef.chart.value.layerReach ?? DEFAULT_LAYER_REACH)
 </script>
 
 <template>
@@ -47,9 +50,16 @@ const chartDimensionMax = MAX_CHART_DIMENSION
       :data-list-step-interval="1"
       @handle-change="store.setHeight"
     />
-    <p v-if="storeRef.resizeBlockMessage.value" class="resize-block-message">
-      {{ storeRef.resizeBlockMessage.value }}
-    </p>
+    <div class="separator" aria-hidden />
+    <RangeInput
+      label="Layer Reach"
+      property="layerReach"
+      :min="1"
+      :max="layerReachMax"
+      :value="layerReach"
+      :data-list-step-interval="1"
+      @handle-change="store.setLayerReach"
+    />
     <div class="separator" aria-hidden />
     <SelectInput
       label="Background Type"
