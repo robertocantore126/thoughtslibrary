@@ -2,7 +2,7 @@
 
 // Functions related to importing and exporting charts
 
-import type { ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } from '../types'
+import type { Chart, ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } from '../types'
 import { createApp } from 'vue'
 import { backendBaseUrl } from '../api/config'
 import PrintDocument from '../components/PrintDocument.vue'
@@ -533,6 +533,35 @@ export async function parseUploadedText(text: string) {
   return decoded
 }
 
+// A .topster decodes to plain JSON, so a file can parse cleanly and still be
+// structurally wrong. Everything here runs BEFORE the chart is written to
+// storage and made active: previously a malformed chart was persisted and
+// activated first and only then blew up, so the failure repeated on every
+// startup and there was no way back without clearing storage by hand.
+function assertImportableChart(json: unknown, uuid: string | undefined): asserts json is StoredCharts {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    throw new Error('This file does not contain a chart.')
+  }
+
+  if (!uuid) {
+    throw new Error('This file contains no charts.')
+  }
+
+  const entry = (json as Record<string, unknown>)[uuid] as { data?: unknown } | undefined
+  const data = entry?.data as Partial<Chart> | undefined
+
+  if (!data || typeof data !== 'object') {
+    throw new Error('This chart is missing its data and was not imported.')
+  }
+
+  const hasUsableSize = Number.isFinite(Number(data.size?.x)) && Number.isFinite(Number(data.size?.y))
+  const hasUsableContent = Array.isArray(data.items) || (!!data.coordinates && typeof data.coordinates === 'object')
+
+  if (!hasUsableSize || !hasUsableContent) {
+    throw new Error('This chart is malformed and was not imported.')
+  }
+}
+
 export async function importChart(event: Event) {
   const files = (event.target as HTMLInputElement).files
 
@@ -554,6 +583,8 @@ export async function importChart(event: Event) {
     const json = JSON.parse(results) as StoredCharts
 
     const newChartUuid = Object.keys(json)[0]
+    assertImportableChart(json, newChartUuid)
+
     const existingChart = findByUuid(newChartUuid)
     const newChart = json[newChartUuid] as StoredPremigrationChart
 
