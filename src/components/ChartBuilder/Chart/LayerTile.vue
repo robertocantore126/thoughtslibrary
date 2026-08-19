@@ -246,9 +246,9 @@ function handleDragStart(ev: DragEvent) {
   }
 }
 
-// Tiles themselves only accept external images and search-result drops.
-// Same-layer moves land on empty cells — the + buttons — never on occupied
-// tiles, so a layer drag over a tile is refused.
+// Accepts external images, search-result drops, and tiles dragged from this
+// same layer - dropping onto an occupied tile swaps the two. The parent is a
+// grid tile rather than a layer member, so it never takes a layer drop.
 function allowDrop(ev: DragEvent) {
   ev.preventDefault()
   const dataTransfer = ev.dataTransfer
@@ -260,7 +260,7 @@ function allowDrop(ev: DragEvent) {
   if (Array.from(dataTransfer.types).includes('application/json')) {
     const dragData = parseDragData(ev)
     if (isLayerDrag(dragData)) {
-      dropEffect = 'none'
+      dropEffect = !props.isParent && dragData.parentId === props.parentId ? 'move' : 'none'
     }
     else if (dragData && Number.isInteger(dragData.originalIndex)) {
       dropEffect = 'none'
@@ -277,8 +277,18 @@ async function handleDrop(ev: DragEvent) {
 
   const dragData = parseDragData(ev)
 
+  // A tile from this same layer: swap the two. Covers dropping onto an empty
+  // tile created with +, which is a real layer entry and so renders as a tile
+  // rather than as one of the overlay's empty drop cells.
   if (isLayerDrag(dragData)) {
-    return // layer moves land on + buttons, never on occupied tiles
+    if (!props.isParent && dragData.parentId === props.parentId && dragData.offset !== props.offset) {
+      store.moveLayerTile({
+        parentId: props.parentId,
+        fromOffset: dragData.offset,
+        toOffset: props.offset,
+      })
+    }
+    return
   }
 
   if (dragData && Number.isInteger(dragData.originalIndex)) {

@@ -936,16 +936,28 @@ export const useStore = defineStore('store', {
       if (!isInBounds(parentCoord.x + to.x, parentCoord.y + to.y, this.chart.size)) {
         return
       }
-      if (p.toOffset !== p.fromOffset && layer[p.toOffset]) {
-        return
-      }
+      // Dropping onto an occupied cell swaps the two tiles, the same way
+      // moveItem does on the main grid. An empty tile created with + is a real
+      // layer entry, so refusing occupied targets made those undroppable.
+      const displaced = p.toOffset === p.fromOffset ? null : layer[p.toOffset]
+
       delete layer[p.fromOffset]
       layer[p.toOffset] = moving
+
+      if (displaced) {
+        layer[p.fromOffset] = displaced
+      }
+
       layers[p.parentId] = layer
       this.chart = chartWithLayers(this.chart, layers)
 
-      if (this.selection?.kind === 'layer' && this.selection.parentId === p.parentId && this.selection.offset === p.fromOffset) {
-        this.selection = { kind: 'layer', parentId: p.parentId, offset: p.toOffset }
+      if (this.selection?.kind === 'layer' && this.selection.parentId === p.parentId) {
+        if (this.selection.offset === p.fromOffset) {
+          this.selection = { kind: 'layer', parentId: p.parentId, offset: p.toOffset }
+        }
+        else if (displaced && this.selection.offset === p.toOffset) {
+          this.selection = { kind: 'layer', parentId: p.parentId, offset: p.fromOffset }
+        }
       }
     },
     selectLayerTile(p: { parentId: string, offset: string }) {
