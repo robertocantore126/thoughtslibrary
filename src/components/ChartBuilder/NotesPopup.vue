@@ -118,6 +118,45 @@ function addLink() {
   }
 }
 
+// Opening the native color picker wipes the document selection, so capture the
+// editor's range before the picker shows and restore it when a color is picked.
+const savedColorRange = ref<Range | null>(null)
+
+function captureSelectionForColor() {
+  const selection = window.getSelection()
+  const editor = editorEl.value
+  if (!selection || !editor || selection.rangeCount === 0) {
+    savedColorRange.value = null
+    return
+  }
+
+  const range = selection.getRangeAt(0)
+  if (editor.contains(range.commonAncestorContainer)) {
+    savedColorRange.value = range.cloneRange()
+  }
+  else {
+    savedColorRange.value = null
+  }
+}
+
+function applyColor(event: Event, command: 'foreColor' | 'hiliteColor') {
+  const value = (event.target as HTMLInputElement).value
+  const editor = editorEl.value
+  if (!editor) {
+    return
+  }
+
+  if (savedColorRange.value) {
+    editor.focus()
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(savedColorRange.value)
+    savedColorRange.value = null
+  }
+
+  exec(command, value)
+}
+
 function onEditorKeydown(event: KeyboardEvent) {
   if (event.key === 'Tab') {
     event.preventDefault()
@@ -225,6 +264,23 @@ onUnmounted(() => {
       <button type="button" title="Horizontal rule" aria-label="Horizontal rule" @mousedown.prevent @click="exec('insertHorizontalRule')">
         <BIconSubtract />
       </button>
+      <span class="toolbar-divider" aria-hidden="true" />
+      <label class="color-control" title="Text color" @mousedown="captureSelectionForColor">
+        <input
+          type="color"
+          value="#ffffff"
+          aria-label="Text color"
+          @change="(event) => applyColor(event, 'foreColor')"
+        >
+      </label>
+      <label class="color-control" title="Highlight (background) color" @mousedown="captureSelectionForColor">
+        <input
+          type="color"
+          value="#ffff00"
+          aria-label="Highlight color"
+          @change="(event) => applyColor(event, 'hiliteColor')"
+        >
+      </label>
     </div>
     <div
       ref="editorEl"
@@ -347,6 +403,41 @@ onUnmounted(() => {
   height: 18px;
   background: rgba(255, 255, 255, 0.15);
   margin: 0 4px;
+}
+
+.color-control {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.color-control:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.color-control input[type='color'] {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  padding: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.color-control input[type='color']::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.color-control input[type='color']::-webkit-color-swatch {
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
 }
 
 .notes-editor {

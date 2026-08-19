@@ -27,6 +27,11 @@ function getWindowApi() {
         filePath?: string
         error?: string
       }>
+      readChartFile?: (filePath: string) => Promise<{
+        success: boolean
+        content?: string | null
+        error?: string
+      }>
       getPathForFile?: (file: File) => string
     }
   }).electronAPI
@@ -305,6 +310,49 @@ export async function exportCurrentChartToPdf() {
 
 type SaveChartMode = 'save' | 'save-as'
 
+// Extracts the chart uuid stored inside a .topster backup. Returns null when
+// the content isn't a parseable single-chart backup.
+async function getStoredChartUuid(content: string): Promise<string | null> {
+  try {
+    const decoded = await parseUploadedText(content)
+    const parsed = JSON.parse(decoded) as Record<string, unknown>
+    const keys = Object.keys(parsed)
+    return keys.length === 1 ? keys[0] : null
+  }
+  catch {
+    return null
+  }
+}
+
+// A plain "save" writes straight through the chart's remembered path without
+// any dialog. Before doing that, verify the file on disk still belongs to this
+// chart: if it now contains a different chart, or content that isn't a chart
+// backup, refuse to overwrite so a same-named file is never silently clobbered.
+async function assertNoSaveConflict(uuid: string, filePath: string): Promise<void> {
+  const api = getWindowApi()
+  if (!api?.readChartFile) {
+    return
+  }
+
+  const result = await api.readChartFile(filePath)
+
+  // File is missing (or unreadable / no path support): nothing to protect.
+  if (!result.success || result.content == null) {
+    return
+  }
+
+  const existingUuid = await getStoredChartUuid(result.content)
+  if (existingUuid === uuid) {
+    return
+  }
+
+  if (existingUuid === null) {
+    throw new Error(`Save blocked: "${filePath}" exists but is not a chart backup, so it was not overwritten. Use "Save as..." to pick a different location.`)
+  }
+
+  throw new Error(`Save blocked: "${filePath}" now contains a different chart and was not overwritten. Use "Save as..." to pick a different location.`)
+}
+
 // Saves the active chart to its own remembered path (if it has one).
 // Returns the resolved file path on success, or null if the user canceled.
 export async function saveCurrentChartToFile(): Promise<string | null> {
@@ -334,6 +382,12 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
   // this is so it never silently overwrites a file it wasn't explicitly asked to.
   const rememberedPath = getRememberedChartFilePath(uuid)
   const filePath = mode === 'save' && rememberedPath ? rememberedPath : undefined
+
+  // Before a dialog-free write-through, make sure the file on disk still
+  // belongs to this chart; refuse if it now holds something else.
+  if (filePath) {
+    await assertNoSaveConflict(uuid, filePath)
+  }
 
   const result = await (async () => {
     const api = getWindowApi()

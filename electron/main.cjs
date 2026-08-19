@@ -91,6 +91,24 @@ ipcMain.handle('save-chart-file', async (_event, payload) => {
   }
 })
 
+ipcMain.handle('read-chart-file', async (_event, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) {
+    return { success: false, error: 'Missing file path' }
+  }
+
+  try {
+    const content = await fs.promises.readFile(filePath, 'utf8')
+    return { success: true, content }
+  }
+  catch (error) {
+    // A missing file is not a conflict: there is nothing to overwrite yet.
+    if (error && typeof error === 'object' && error.code === 'ENOENT') {
+      return { success: true, content: null }
+    }
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+  }
+})
+
 ipcMain.handle('print-chart-to-pdf', async (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender)
 
