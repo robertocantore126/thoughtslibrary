@@ -10,6 +10,7 @@ import { MAX_CHART_DIMENSION } from '../store'
 import { BackgroundTypes } from '../types'
 import { inlineStoredChartAssets, inlineStoredImageUrl, isLocalAssetUrl, persistChartAssets } from './assets'
 import { forceRefresh } from './chart'
+import { ensureWritePermission, getRememberedFileHandle, rememberFileHandle, type StoredFileHandle } from './fileHandles'
 import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
 
 function getWindowApi() {
@@ -410,6 +411,11 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
     await assertNoSaveConflict(uuid, filePath)
   }
 
+  // Set when the browser File System Access path handled the write. Its
+  // "filePath" is only a file name, never a real path, so it must not be
+  // remembered as one.
+  let savedViaHandle = false
+
   const result = await (async () => {
     const api = getWindowApi()
 
@@ -438,6 +444,21 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
       }>
     }
 
+    // Browser write-through: reuse the handle this chart was last saved with,
+    // so a plain "save" never reopens the picker. Only for mode 'save' - a
+    // "save as" must always let the user choose a new destination.
+    if (mode === 'save') {
+      const storedHandle = await getRememberedFileHandle(uuid)
+
+      if (storedHandle && await ensureWritePermission(storedHandle)) {
+        const writable = await storedHandle.createWritable()
+        await writable.write(compressed)
+        await writable.close()
+        savedViaHandle = true
+        return { success: true, filePath: storedHandle.name }
+      }
+    }
+
     if (typeof windowWithPicker.showSaveFilePicker === 'function') {
       const handle = await windowWithPicker.showSaveFilePicker({
         suggestedName: `${normalizeChartTitle(activeChart.data.title)}.topster`,
@@ -451,6 +472,9 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
       const writable = await handle.createWritable()
       await writable.write(compressed)
       await writable.close()
+      // Keep the handle so the next plain save writes straight through.
+      await rememberFileHandle(uuid, handle as unknown as StoredFileHandle)
+      savedViaHandle = true
       return { success: true, filePath: handle.name }
     }
 
@@ -466,7 +490,7 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
   }
 
   const savedPath = 'filePath' in result ? result.filePath || '' : ''
-  if (savedPath) {
+  if (savedPath && !savedViaHandle) {
     rememberChartFilePath(uuid, savedPath)
   }
   return savedPath || null
