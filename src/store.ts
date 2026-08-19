@@ -1,11 +1,26 @@
 import { defineStore } from 'pinia'
-import { BackgroundTypes, type Chart, type ChartCoordinates, type ChartItem, type ChartSize } from './types'
+import { v4 as uuidv4 } from 'uuid'
+import {
+  BackgroundTypes,
+  type Chart,
+  type ChartCoordinates,
+  type ChartItem,
+  type ChartSize,
+  type Direction,
+  type RelatedLayer,
+  type Selection,
+} from './types'
 
 export interface State {
   chart: Chart
   collapsed: boolean
-  activeTileKey: string | null
-  notesPopupKey: string | null
+  selection: Selection | null
+  notesPopupKey: Selection | null
+  focusedTileId: string | null
+  resizeBlockMessage: string | null
+  // Timestamp of the last successful save to a file. Bumped on every save so a
+  // repeated save re-triggers the confirmation, even to the same path.
+  lastSavedAt: number | null
   textUndoStack: TextUndoEntry[]
   isApplyingTextUndo: boolean
 }
@@ -17,6 +32,19 @@ const LEGACY_NOTES_ICON_URL = '/notes_tile.svg'
 const DEFAULT_CHART_SIZE: ChartSize = {
   x: 5,
   y: 5,
+}
+
+// Canonical direction deltas (see §2 of the brief).
+// dx > 0 is right, dy > 0 is down.
+const DIRECTION_DELTAS: Record<Direction, { x: number, y: number }> = {
+  n: { x: 0, y: -1 },
+  ne: { x: 1, y: -1 },
+  e: { x: 1, y: 0 },
+  se: { x: 1, y: 1 },
+  s: { x: 0, y: 1 },
+  sw: { x: -1, y: 1 },
+  w: { x: -1, y: 0 },
+  nw: { x: -1, y: -1 },
 }
 
 function clampDimension(value: number): number {
@@ -38,8 +66,196 @@ function coordKey(x: number, y: number): string {
   return `${x},${y}`
 }
 
+function offsetKey(x: number, y: number): string {
+  return `${x},${y}`
+}
+
 function isInBounds(x: number, y: number, size: ChartSize): boolean {
   return x >= 1 && x <= size.x && y >= 1 && y <= size.y
+}
+
+function parseOffset(offset: string): { x: number, y: number } {
+  const [xRaw, yRaw] = offset.split(',')
+  const x = Number.parseInt(xRaw)
+  const y = Number.parseInt(yRaw)
+  if (Number.isNaN(x) || Number.isNaN(y)) {
+    return { x: 0, y: 0 }
+  }
+  return { x, y }
+}
+
+function selectionsEqual(a: Selection, b: Selection): boolean {
+  if (a.kind !== b.kind) {
+    return false
+  }
+  if (a.kind === 'tile' && b.kind === 'tile') {
+    return a.key === b.key
+  }
+  if (a.kind === 'layer' && b.kind === 'layer') {
+    return a.parentId === b.parentId && a.offset === b.offset
+  }
+  return false
+}
+
+function findItemCoord(coordinates: ChartCoordinates, id: string): { x: number, y: number } | null {
+  for (const [key, item] of Object.entries(coordinates)) {
+    if (item?.id === id) {
+      const [xRaw, yRaw] = key.split(',')
+      const x = Number.parseInt(xRaw)
+      const y = Number.parseInt(yRaw)
+      if (!Number.isNaN(x) && !Number.isNaN(y)) {
+        return { x, y }
+      }
+    }
+  }
+  return null
+}
+
+// The single resolver: every editor action routes its target through here.
+function resolveItemAt(chart: Chart, selection: Selection): ChartItem | null {
+  if (selection.kind === 'tile') {
+    return chart.coordinates?.[selection.key] || null
+  }
+  return chart.relatedLayers?.[selection.parentId]?.[selection.offset] || null
+}
+
+// True if any tile in the layer would fall outside `size` when the layer's
+// parent sits at `coord`.
+function layerLeavesBounds(layer: RelatedLayer, coord: { x: number, y: number }, size: ChartSize): boolean {
+  for (const offset of Object.keys(layer)) {
+    const delta = parseOffset(offset)
+    if (!isInBounds(coord.x + delta.x, coord.y + delta.y, size)) {
+      return true
+    }
+  }
+  return false
+}
+
+// Produces a new chart with the item at `selection` replaced by
+// `transform(item)`. A null result removes the item; removing a layer tile's
+// last entry deletes the layer itself. `items` is only recomputed for grid
+// tiles — layer tiles live outside the grid array.
+function applyItemUpdate(chart: Chart, selection: Selection, transform: (item: ChartItem) => ChartItem | null): Chart {
+  if (selection.kind === 'tile') {
+    const coordinates = { ...(chart.coordinates || {}) }
+    const item = coordinates[selection.key]
+    if (!item) {
+      return chart
+    }
+    const next = transform(item)
+    if (next) {
+      coordinates[selection.key] = next
+    }
+    else {
+      delete coordinates[selection.key]
+    }
+    return {
+      ...chart,
+      coordinates,
+      items: itemsFromCoordinates(coordinates, chart.size),
+    }
+  }
+
+  const layers = { ...(chart.relatedLayers || {}) }
+  const layer = { ...(layers[selection.parentId] || {}) }
+  const item = layer[selection.offset]
+  if (!item) {
+    return chart
+  }
+  const next = transform(item)
+  if (next) {
+    layer[selection.offset] = next
+  }
+  else {
+    delete layer[selection.offset]
+  }
+  if (Object.keys(layer).length === 0) {
+    delete layers[selection.parentId]
+  }
+  else {
+    layers[selection.parentId] = layer
+  }
+  return chartWithLayers(chart, layers)
+}
+
+// Keeps `relatedLayers` absent from the chart once it holds nothing.
+function chartWithLayers(chart: Chart, layers: Record<string, RelatedLayer>): Chart {
+  if (Object.keys(layers).length === 0) {
+    const { relatedLayers: _relatedLayers, ...rest } = chart
+    return { ...rest }
+  }
+  return { ...chart, relatedLayers: layers }
+}
+
+// Smallest dimension at which every layer tile still fits, per axis.
+function minDimensionForLayers(chart: Chart, axis: 'x' | 'y'): number {
+  const coordinates = chart.coordinates || {}
+  const layers = chart.relatedLayers
+  if (!layers || Object.keys(layers).length === 0) {
+    return 1
+  }
+  let min = 1
+  for (const [parentId, layer] of Object.entries(layers)) {
+    const parentCoord = findItemCoord(coordinates, parentId)
+    if (!parentCoord) {
+      continue
+    }
+    for (const offset of Object.keys(layer)) {
+      const delta = parseOffset(offset)
+      const absolute = axis === 'x' ? parentCoord.x + delta.x : parentCoord.y + delta.y
+      min = Math.max(min, absolute)
+    }
+  }
+  return Math.min(min, MAX_CHART_DIMENSION)
+}
+
+// Titles of the parents whose layers pin the given minimum dimension.
+function blockingParentTitles(chart: Chart, axis: 'x' | 'y', minDimension: number): string[] {
+  const coordinates = chart.coordinates || {}
+  const layers = chart.relatedLayers
+  if (!layers) {
+    return []
+  }
+  const titles: string[] = []
+  for (const [parentId, layer] of Object.entries(layers)) {
+    const parentCoord = findItemCoord(coordinates, parentId)
+    if (!parentCoord) {
+      continue
+    }
+    let maxAbsolute = 0
+    for (const offset of Object.keys(layer)) {
+      const delta = parseOffset(offset)
+      const absolute = axis === 'x' ? parentCoord.x + delta.x : parentCoord.y + delta.y
+      maxAbsolute = Math.max(maxAbsolute, absolute)
+    }
+    if (maxAbsolute >= minDimension) {
+      const parentItem = coordinates[coordKey(parentCoord.x, parentCoord.y)]
+      titles.push(parentItem?.title?.trim() || 'A tile')
+    }
+  }
+  return [...new Set(titles)]
+}
+
+// First unoccupied in-bounds offset for the layer, scanning row-major.
+// "0,0" is the parent's own cell and is never stored.
+function firstEmptyLayerOffset(chart: Chart, parentCoord: { x: number, y: number }, layer: RelatedLayer): string | null {
+  const minDx = -(parentCoord.x - 1)
+  const maxDx = chart.size.x - parentCoord.x
+  const minDy = -(parentCoord.y - 1)
+  const maxDy = chart.size.y - parentCoord.y
+
+  for (let dy = minDy; dy <= maxDy; dy++) {
+    for (let dx = minDx; dx <= maxDx; dx++) {
+      if (dx === 0 && dy === 0) {
+        continue
+      }
+      const key = offsetKey(dx, dy)
+      if (!layer[key]) {
+        return key
+      }
+    }
+  }
+  return null
 }
 
 function coordinatesFromItems(items: Array<ChartItem | null>, width: number): ChartCoordinates {
@@ -97,30 +313,35 @@ function mergeLegacyNotesIntoCoordinates(coordinates: ChartCoordinates, tileNote
   return merged
 }
 
+// Entry point for every item that lands in the store: guarantees an id and
+// applies the thought-icon normalizations. A missing id must never reach the
+// rest of the app.
 function normalizeChartItem(item: ChartItem): ChartItem {
-  if (item.itemType === 'thought') {
+  const withId = item.id ? item : { ...item, id: uuidv4() }
+
+  if (withId.itemType === 'thought') {
     return {
-      ...item,
+      ...withId,
       coverURL: THOUGHT_ICON_URL,
     }
   }
 
-  if (item.coverURL === LEGACY_NOTES_ICON_URL) {
+  if (withId.coverURL === LEGACY_NOTES_ICON_URL) {
     return {
-      ...item,
+      ...withId,
       itemType: 'thought',
       coverURL: THOUGHT_ICON_URL,
     }
   }
 
-  if (item.coverURL === THOUGHT_ICON_URL && item.attachmentURL && item.itemType !== 'thought') {
+  if (withId.coverURL === THOUGHT_ICON_URL && withId.attachmentURL && withId.itemType !== 'thought') {
     return {
-      ...item,
+      ...withId,
       itemType: 'thought',
     }
   }
 
-  return item
+  return withId
 }
 
 function normalizeCoordinates(coordinates: ChartCoordinates): ChartCoordinates {
@@ -133,11 +354,36 @@ function normalizeCoordinates(coordinates: ChartCoordinates): ChartCoordinates {
   return normalized
 }
 
+function normalizeRelatedLayers(relatedLayers?: Record<string, RelatedLayer>): Record<string, RelatedLayer> | undefined {
+  if (!relatedLayers) {
+    return undefined
+  }
+
+  const normalized: Record<string, RelatedLayer> = {}
+  for (const [parentId, layer] of Object.entries(relatedLayers)) {
+    const normalizedLayer: RelatedLayer = {}
+    for (const [offset, item] of Object.entries(layer)) {
+      if (!item) {
+        continue
+      }
+      normalizedLayer[offset] = normalizeChartItem(item)
+    }
+    if (Object.keys(normalizedLayer).length > 0) {
+      normalized[parentId] = normalizedLayer
+    }
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined
+}
+
 export const initialState = {
   chart: createEmptyChart(),
   collapsed: true,
-  activeTileKey: null,
+  selection: null,
   notesPopupKey: null,
+  focusedTileId: null,
+  resizeBlockMessage: null,
+  lastSavedAt: null,
   textUndoStack: [],
   isApplyingTextUndo: false,
 } as State
@@ -161,6 +407,14 @@ export function createEmptyChart(): Chart {
   }
 }
 
+function createLayerTile(): ChartItem {
+  return {
+    id: uuidv4(),
+    title: '',
+    coverURL: '',
+  }
+}
+
 interface ItemData {
   data: ChartItem | null
   title?: string
@@ -171,7 +425,7 @@ interface ItemData {
 type TextField = 'title' | 'creator' | 'notes'
 
 interface TextUndoEntry {
-  tileKey: string
+  selection: Selection
   field: TextField
   previousValue: string
 }
@@ -183,7 +437,7 @@ export const useStore = defineStore('store', {
     return { ...initialState }
   },
   actions: {
-    recordTextEdit(payload: { tileKey: string, field: TextField, previousValue: string, nextValue: string }) {
+    recordTextEdit(payload: { selection: Selection, field: TextField, previousValue: string, nextValue: string }) {
       if (this.isApplyingTextUndo) {
         return
       }
@@ -193,7 +447,7 @@ export const useStore = defineStore('store', {
       }
 
       this.textUndoStack.push({
-        tileKey: payload.tileKey,
+        selection: payload.selection,
         field: payload.field,
         previousValue: payload.previousValue,
       })
@@ -208,51 +462,40 @@ export const useStore = defineStore('store', {
         return
       }
 
-      const coordinates = { ...(this.chart.coordinates || {}) }
-      const item = coordinates[lastEdit.tileKey]
+      const item = resolveItemAt(this.chart, lastEdit.selection)
       if (!item) {
         return
       }
 
       this.isApplyingTextUndo = true
 
-      if (lastEdit.field === 'title') {
-        coordinates[lastEdit.tileKey] = {
-          ...item,
-          title: lastEdit.previousValue,
+      this.chart = applyItemUpdate(this.chart, lastEdit.selection, (current) => {
+        if (lastEdit.field === 'title') {
+          return {
+            ...current,
+            title: lastEdit.previousValue,
+          }
         }
-      }
-      else if (lastEdit.field === 'creator') {
-        if (lastEdit.previousValue.trim() === '') {
-          const { creator: _creator, ...itemWithoutCreator } = item
-          coordinates[lastEdit.tileKey] = itemWithoutCreator
-        }
-        else {
-          coordinates[lastEdit.tileKey] = {
-            ...item,
+        if (lastEdit.field === 'creator') {
+          if (lastEdit.previousValue.trim() === '') {
+            const { creator: _creator, ...itemWithoutCreator } = current
+            return itemWithoutCreator
+          }
+          return {
+            ...current,
             creator: lastEdit.previousValue,
           }
         }
-      }
-      else {
         if (lastEdit.previousValue.trim() === '') {
-          const { notes: _notes, ...itemWithoutNotes } = item
-          coordinates[lastEdit.tileKey] = itemWithoutNotes
+          const { notes: _notes, ...itemWithoutNotes } = current
+          return itemWithoutNotes
         }
-        else {
-          coordinates[lastEdit.tileKey] = {
-            ...item,
-            notes: lastEdit.previousValue,
-          }
+        return {
+          ...current,
+          notes: lastEdit.previousValue,
         }
-      }
-
-      this.chart = {
-        ...this.chart,
-        coordinates,
-        items: itemsFromCoordinates(coordinates, this.chart.size),
-      }
-      this.activeTileKey = lastEdit.tileKey
+      })
+      this.selection = lastEdit.selection
       this.isApplyingTextUndo = false
     },
     syncItemsFromCoordinates() {
@@ -266,6 +509,7 @@ export const useStore = defineStore('store', {
       const coords = { ...(this.chart.coordinates || {}) }
       const { x, y } = indexToCoord(payload.index, this.chart.size.x)
       const key = coordKey(x, y)
+      const previous = coords[key]
 
       if (payload.item) {
         coords[key] = normalizeChartItem(payload.item)
@@ -274,21 +518,38 @@ export const useStore = defineStore('store', {
         delete coords[key]
       }
 
+      // Removing (or overwriting) a parent removes its whole layer.
+      let layers = this.chart.relatedLayers
+      if (previous && (!payload.item || previous.id !== coords[key]?.id)) {
+        if (layers?.[previous.id]) {
+          const { [previous.id]: _removed, ...rest } = layers
+          layers = rest
+        }
+      }
+
+      this.chart = chartWithLayers(this.chart, layers || {})
+
+      if (!payload.item && this.selection?.kind === 'tile' && this.selection.key === key) {
+        this.selection = null
+        this.notesPopupKey = null
+      }
+      if (!payload.item && this.selection?.kind === 'layer' && previous && this.selection.parentId === previous.id) {
+        this.selection = null
+        this.notesPopupKey = null
+      }
+
       this.chart = {
         ...this.chart,
         coordinates: coords,
         items: itemsFromCoordinates(coords, this.chart.size),
       }
-
-      if (!payload.item && this.activeTileKey === key) {
-        this.activeTileKey = null
-      }
-      if (!payload.item && this.notesPopupKey === key) {
-        this.notesPopupKey = null
-      }
     },
     // For changing the place of a current item
     moveItem(payload: { oldIndex: number, newIndex: number }) {
+      if (!this.canMoveTile(payload.oldIndex, payload.newIndex)) {
+        return
+      }
+
       const coords = { ...(this.chart.coordinates || {}) }
       const oldCoord = indexToCoord(payload.oldIndex, this.chart.size.x)
       const newCoord = indexToCoord(payload.newIndex, this.chart.size.x)
@@ -316,185 +577,158 @@ export const useStore = defineStore('store', {
         items: itemsFromCoordinates(coords, this.chart.size),
       }
 
-      if (this.activeTileKey && !coords[this.activeTileKey]) {
-        this.activeTileKey = null
+      if (this.selection?.kind === 'tile' && !coords[this.selection.key]) {
+        this.selection = null
+        this.notesPopupKey = null
       }
     },
     selectTile(payload: { x: number, y: number }) {
       const key = coordKey(payload.x, payload.y)
       const item = this.chart.coordinates?.[key]
-      this.activeTileKey = item ? key : null
-      this.notesPopupKey = item && item.notes?.trim() ? key : null
+      this.selection = item ? { kind: 'tile', key } : null
+      this.notesPopupKey = item && item.notes?.trim() ? { kind: 'tile', key } : null
+    },
+    markChartSaved() {
+      this.lastSavedAt = Date.now()
     },
     closeNotesPopup() {
       this.notesPopupKey = null
     },
     openNotesPopup() {
-      if (this.activeTileKey) {
-        this.notesPopupKey = this.activeTileKey
+      if (this.selection) {
+        this.notesPopupKey = this.selection
       }
     },
     clearActiveTile() {
-      this.activeTileKey = null
+      this.selection = null
       this.notesPopupKey = null
     },
     setActiveTileNote(note: string) {
-      if (!this.activeTileKey) {
+      const selection = this.selection
+      if (!selection) {
         return
       }
 
-      const coordinates = { ...(this.chart.coordinates || {}) }
-      const activeItem = coordinates[this.activeTileKey]
-
+      const activeItem = resolveItemAt(this.chart, selection)
       if (!activeItem) {
         return
       }
 
       this.recordTextEdit({
-        tileKey: this.activeTileKey,
+        selection,
         field: 'notes',
         previousValue: activeItem.notes || '',
         nextValue: note,
       })
 
-      if (note.trim() === '') {
-        const { notes: _notes, ...itemWithoutNotes } = activeItem
-        coordinates[this.activeTileKey] = itemWithoutNotes
-      }
-      else {
-        coordinates[this.activeTileKey] = {
-          ...activeItem,
+      this.chart = applyItemUpdate(this.chart, selection, (item) => {
+        if (note.trim() === '') {
+          const { notes: _notes, ...itemWithoutNotes } = item
+          return itemWithoutNotes
+        }
+        return {
+          ...item,
           notes: note,
         }
-      }
-
-      this.chart = {
-        ...this.chart,
-        coordinates,
-        items: itemsFromCoordinates(coordinates, this.chart.size),
-      }
+      })
     },
     setActiveTileTitle(title: string) {
-      if (!this.activeTileKey) {
+      const selection = this.selection
+      if (!selection) {
         return
       }
 
-      const coordinates = { ...(this.chart.coordinates || {}) }
-      const activeItem = coordinates[this.activeTileKey]
+      const activeItem = resolveItemAt(this.chart, selection)
       if (!activeItem) {
         return
       }
 
       this.recordTextEdit({
-        tileKey: this.activeTileKey,
+        selection,
         field: 'title',
         previousValue: activeItem.title,
         nextValue: title,
       })
 
-      coordinates[this.activeTileKey] = {
-        ...activeItem,
+      this.chart = applyItemUpdate(this.chart, selection, item => ({
+        ...item,
         title,
-      }
-
-      this.chart = {
-        ...this.chart,
-        coordinates,
-        items: itemsFromCoordinates(coordinates, this.chart.size),
-      }
+      }))
     },
     setActiveTileCreator(creator: string) {
-      if (!this.activeTileKey) {
+      const selection = this.selection
+      if (!selection) {
         return
       }
 
-      const coordinates = { ...(this.chart.coordinates || {}) }
-      const activeItem = coordinates[this.activeTileKey]
+      const activeItem = resolveItemAt(this.chart, selection)
       if (!activeItem) {
         return
       }
 
       this.recordTextEdit({
-        tileKey: this.activeTileKey,
+        selection,
         field: 'creator',
         previousValue: activeItem.creator || '',
         nextValue: creator,
       })
 
-      if (creator.trim() === '') {
-        const { creator: _creator, ...itemWithoutCreator } = activeItem
-        coordinates[this.activeTileKey] = itemWithoutCreator
-      }
-      else {
-        coordinates[this.activeTileKey] = {
-          ...activeItem,
+      this.chart = applyItemUpdate(this.chart, selection, (item) => {
+        if (creator.trim() === '') {
+          const { creator: _creator, ...itemWithoutCreator } = item
+          return itemWithoutCreator
+        }
+        return {
+          ...item,
           creator,
         }
-      }
-
-      this.chart = {
-        ...this.chart,
-        coordinates,
-        items: itemsFromCoordinates(coordinates, this.chart.size),
-      }
+      })
     },
     setActiveTileRating(rating: number | null) {
-      if (!this.activeTileKey) {
+      const selection = this.selection
+      if (!selection) {
         return
       }
 
-      const coordinates = { ...(this.chart.coordinates || {}) }
-      const activeItem = coordinates[this.activeTileKey]
+      const activeItem = resolveItemAt(this.chart, selection)
       if (!activeItem) {
         return
       }
 
-      if (rating === null) {
-        const { rating: _rating, ...itemWithoutRating } = activeItem
-        coordinates[this.activeTileKey] = itemWithoutRating
-      }
-      else {
+      this.chart = applyItemUpdate(this.chart, selection, (item) => {
+        if (rating === null) {
+          const { rating: _rating, ...itemWithoutRating } = item
+          return itemWithoutRating
+        }
         const normalized = Math.max(1, Math.min(7, Math.round(rating)))
-        coordinates[this.activeTileKey] = {
-          ...activeItem,
+        return {
+          ...item,
           rating: normalized,
         }
-      }
-
-      this.chart = {
-        ...this.chart,
-        coordinates,
-        items: itemsFromCoordinates(coordinates, this.chart.size),
-      }
+      })
     },
     setActiveTileAttachment(attachmentURL: string) {
-      if (!this.activeTileKey) {
+      const selection = this.selection
+      if (!selection) {
         return
       }
 
-      const coordinates = { ...(this.chart.coordinates || {}) }
-      const activeItem = coordinates[this.activeTileKey]
+      const activeItem = resolveItemAt(this.chart, selection)
       const isThoughtLikeItem = activeItem && (activeItem.itemType === 'thought' || activeItem.coverURL === THOUGHT_ICON_URL)
       if (!isThoughtLikeItem) {
         return
       }
 
-      if (attachmentURL.trim() === '') {
-        const { attachmentURL: _attachmentURL, ...itemWithoutAttachment } = activeItem
-        coordinates[this.activeTileKey] = itemWithoutAttachment
-      }
-      else {
-        coordinates[this.activeTileKey] = {
-          ...activeItem,
+      this.chart = applyItemUpdate(this.chart, selection, (item) => {
+        if (attachmentURL.trim() === '') {
+          const { attachmentURL: _attachmentURL, ...itemWithoutAttachment } = item
+          return itemWithoutAttachment
+        }
+        return {
+          ...item,
           attachmentURL,
         }
-      }
-
-      this.chart = {
-        ...this.chart,
-        coordinates,
-        items: itemsFromCoordinates(coordinates, this.chart.size),
-      }
+      })
     },
     changeTitle(newTitle: string) {
       this.chart = { ...this.chart, title: newTitle }
@@ -518,7 +752,10 @@ export const useStore = defineStore('store', {
       }
     },
     setHeight(payload: number) {
-      const nextHeight = clampDimension(payload)
+      const requestedHeight = clampDimension(payload)
+      const minHeight = minDimensionForLayers(this.chart, 'y')
+      const blockingTitles = blockingParentTitles(this.chart, 'y', minHeight)
+      const nextHeight = Math.max(requestedHeight, minHeight)
       const nextSize = { ...this.chart.size, y: nextHeight }
 
       this.chart = {
@@ -526,15 +763,40 @@ export const useStore = defineStore('store', {
         size: nextSize,
         items: itemsFromCoordinates(this.chart.coordinates || {}, nextSize),
       }
+
+      if (nextHeight !== requestedHeight) {
+        const first = blockingTitles[0] || 'A tile'
+        const others = blockingTitles.length - 1
+        this.resizeBlockMessage = others > 0
+          ? `Can't shrink further — ${first} and ${others} others have related tiles in this row`
+          : `Can't shrink further — ${first} has related tiles in this row`
+      }
+      else {
+        this.resizeBlockMessage = null
+      }
     },
     setWidth(payload: number) {
-      const nextWidth = clampDimension(payload)
+      const requestedWidth = clampDimension(payload)
+      const minWidth = minDimensionForLayers(this.chart, 'x')
+      const blockingTitles = blockingParentTitles(this.chart, 'x', minWidth)
+      const nextWidth = Math.max(requestedWidth, minWidth)
       const nextSize = { ...this.chart.size, x: nextWidth }
 
       this.chart = {
         ...this.chart,
         size: nextSize,
         items: itemsFromCoordinates(this.chart.coordinates || {}, nextSize),
+      }
+
+      if (nextWidth !== requestedWidth) {
+        const first = blockingTitles[0] || 'A tile'
+        const others = blockingTitles.length - 1
+        this.resizeBlockMessage = others > 0
+          ? `Can't shrink further — ${first} and ${others} others have related tiles in this column`
+          : `Can't shrink further — ${first} has related tiles in this column`
+      }
+      else {
+        this.resizeBlockMessage = null
       }
     },
     changeGap(newGap: number) {
@@ -565,6 +827,7 @@ export const useStore = defineStore('store', {
         ? { ...payload.coordinates }
         : coordinatesFromItems(payload.items, width)
       const coordinates = normalizeCoordinates(mergeLegacyNotesIntoCoordinates(baseCoordinates, payload.tileNotes))
+      const relatedLayers = normalizeRelatedLayers(payload.relatedLayers)
 
       this.chart = {
         ...payload,
@@ -574,21 +837,160 @@ export const useStore = defineStore('store', {
         },
         coordinates,
         items: itemsFromCoordinates(coordinates, { x: width, y: height }),
+        ...(relatedLayers ? { relatedLayers } : {}),
       }
-      this.activeTileKey = null
+      this.selection = null
       this.notesPopupKey = null
+      this.focusedTileId = null
+      this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
     },
     reset() {
       this.chart = createEmptyChart()
-      this.activeTileKey = null
+      this.selection = null
       this.notesPopupKey = null
+      this.focusedTileId = null
+      this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
     },
     toggleCollapse() {
       this.collapsed = !this.collapsed
+    },
+    // --- Focus mode ---
+    toggleFocus(tileId: string) {
+      if (this.focusedTileId === tileId) {
+        this.exitFocus()
+        return
+      }
+      this.focusedTileId = tileId
+    },
+    exitFocus() {
+      this.focusedTileId = null
+      if (this.selection?.kind === 'layer') {
+        this.selection = null
+        this.notesPopupKey = null
+      }
+    },
+    // --- Layer CRUD ---
+    addLayerTile(p: { parentId: string, fromOffset: string, direction: Direction }) {
+      const parentCoord = findItemCoord(this.chart.coordinates || {}, p.parentId)
+      if (!parentCoord) {
+        return
+      }
+      const delta = DIRECTION_DELTAS[p.direction]
+      if (!delta) {
+        return
+      }
+      const from = parseOffset(p.fromOffset)
+      const targetOffset = offsetKey(from.x + delta.x, from.y + delta.y)
+      if (!isInBounds(parentCoord.x + from.x + delta.x, parentCoord.y + from.y + delta.y, this.chart.size)) {
+        return
+      }
+      const layers = { ...(this.chart.relatedLayers || {}) }
+      const layer = { ...(layers[p.parentId] || {}) }
+      if (layer[targetOffset]) {
+        return
+      }
+      layer[targetOffset] = createLayerTile()
+      layers[p.parentId] = layer
+      this.chart = chartWithLayers(this.chart, layers)
+    },
+    setLayerTileItem(p: { parentId: string, offset: string, item: ChartItem | null }) {
+      const layers = { ...(this.chart.relatedLayers || {}) }
+      const layer = { ...(layers[p.parentId] || {}) }
+
+      if (p.item) {
+        layer[p.offset] = normalizeChartItem(p.item)
+        layers[p.parentId] = layer
+      }
+      else {
+        delete layer[p.offset]
+        if (Object.keys(layer).length === 0) {
+          delete layers[p.parentId]
+        }
+        else {
+          layers[p.parentId] = layer
+        }
+        if (this.selection?.kind === 'layer' && this.selection.parentId === p.parentId && this.selection.offset === p.offset) {
+          this.selection = null
+          this.notesPopupKey = null
+        }
+      }
+
+      this.chart = chartWithLayers(this.chart, layers)
+    },
+    moveLayerTile(p: { parentId: string, fromOffset: string, toOffset: string }) {
+      const parentCoord = findItemCoord(this.chart.coordinates || {}, p.parentId)
+      if (!parentCoord) {
+        return
+      }
+      const layers = { ...(this.chart.relatedLayers || {}) }
+      const layer = { ...(layers[p.parentId] || {}) }
+      const moving = layer[p.fromOffset]
+      if (!moving) {
+        return
+      }
+      const to = parseOffset(p.toOffset)
+      if (!isInBounds(parentCoord.x + to.x, parentCoord.y + to.y, this.chart.size)) {
+        return
+      }
+      // Dropping onto an occupied cell swaps the two tiles, the same way
+      // moveItem does on the main grid. An empty tile created with + is a real
+      // layer entry, so refusing occupied targets made those undroppable.
+      const displaced = p.toOffset === p.fromOffset ? null : layer[p.toOffset]
+
+      delete layer[p.fromOffset]
+      layer[p.toOffset] = moving
+
+      if (displaced) {
+        layer[p.fromOffset] = displaced
+      }
+
+      layers[p.parentId] = layer
+      this.chart = chartWithLayers(this.chart, layers)
+
+      if (this.selection?.kind === 'layer' && this.selection.parentId === p.parentId) {
+        if (this.selection.offset === p.fromOffset) {
+          this.selection = { kind: 'layer', parentId: p.parentId, offset: p.toOffset }
+        }
+        else if (displaced && this.selection.offset === p.toOffset) {
+          this.selection = { kind: 'layer', parentId: p.parentId, offset: p.fromOffset }
+        }
+      }
+    },
+    selectLayerTile(p: { parentId: string, offset: string }) {
+      const item = this.chart.relatedLayers?.[p.parentId]?.[p.offset]
+      this.selection = item ? { kind: 'layer', parentId: p.parentId, offset: p.offset } : null
+      this.notesPopupKey = item && item.notes?.trim() ? { kind: 'layer', parentId: p.parentId, offset: p.offset } : null
+    },
+    // Fills the focused layer's first empty in-bounds cell when focus mode is
+    // on, otherwise the main grid's first empty cell.
+    addItemToActiveTarget(item: ChartItem) {
+      const normalized = normalizeChartItem(item)
+
+      if (this.focusedTileId) {
+        const parentCoord = findItemCoord(this.chart.coordinates || {}, this.focusedTileId)
+        if (!parentCoord) {
+          return
+        }
+        const layers = { ...(this.chart.relatedLayers || {}) }
+        const layer = { ...(layers[this.focusedTileId] || {}) }
+        const target = firstEmptyLayerOffset(this.chart, parentCoord, layer)
+        if (!target) {
+          return
+        }
+        layer[target] = normalized
+        layers[this.focusedTileId] = layer
+        this.chart = chartWithLayers(this.chart, layers)
+        return
+      }
+
+      const firstEmptyIndex = this.chart.items.indexOf(null)
+      if (firstEmptyIndex !== -1) {
+        this.addItem({ item: normalized, index: firstEmptyIndex })
+      }
     },
   },
   getters: {
@@ -616,27 +1018,50 @@ export const useStore = defineStore('store', {
         }
       })
     },
+    // KEPT for Item.vue: "x,y" when the selection is a grid tile, else null.
+    activeTileKey(state): string | null {
+      return state.selection?.kind === 'tile' ? state.selection.key : null
+    },
     activeTile(state): { x: number, y: number, item: ChartItem } | null {
-      if (!state.activeTileKey) {
+      const selection = state.selection
+      if (!selection) {
         return null
       }
 
-      const item = state.chart.coordinates?.[state.activeTileKey]
+      const item = resolveItemAt(state.chart, selection)
       if (!item) {
         return null
       }
 
-      const [xRaw, yRaw] = state.activeTileKey.split(',')
-      const x = Number.parseInt(xRaw)
-      const y = Number.parseInt(yRaw)
+      if (selection.kind === 'tile') {
+        const [xRaw, yRaw] = selection.key.split(',')
+        const x = Number.parseInt(xRaw)
+        const y = Number.parseInt(yRaw)
 
-      if (Number.isNaN(x) || Number.isNaN(y) || !isInBounds(x, y, state.chart.size)) {
+        if (Number.isNaN(x) || Number.isNaN(y) || !isInBounds(x, y, state.chart.size)) {
+          return null
+        }
+
+        return { x, y, item }
+      }
+
+      // Layer tiles report their absolute position (parent + offset), which is
+      // always in bounds by construction.
+      const parentCoord = findItemCoord(state.chart.coordinates || {}, selection.parentId)
+      if (!parentCoord) {
+        return null
+      }
+      const delta = parseOffset(selection.offset)
+      const x = parentCoord.x + delta.x
+      const y = parentCoord.y + delta.y
+
+      if (!isInBounds(x, y, state.chart.size)) {
         return null
       }
 
       return { x, y, item }
     },
-    activeTileNote(state): string {
+    activeTileNote(_state): string {
       const active = this.activeTile
       if (!active) {
         return ''
@@ -645,16 +1070,16 @@ export const useStore = defineStore('store', {
       return active.item.notes || ''
     },
     notesPopupNote(state): string {
-      if (!state.activeTileKey || state.notesPopupKey !== state.activeTileKey) {
+      if (!state.selection || !state.notesPopupKey || !selectionsEqual(state.notesPopupKey, state.selection)) {
         return ''
       }
 
-      return state.chart.coordinates?.[state.activeTileKey]?.notes?.trim() || ''
+      return resolveItemAt(state.chart, state.selection)?.notes?.trim() || ''
     },
     notesPopupVisible(state): boolean {
-      return !!state.activeTileKey && state.notesPopupKey === state.activeTileKey
+      return !!state.selection && !!state.notesPopupKey && selectionsEqual(state.notesPopupKey, state.selection)
     },
-    activeTileRating(state): number {
+    activeTileRating(_state): number {
       const active = this.activeTile
       if (!active) {
         return 0
@@ -662,7 +1087,7 @@ export const useStore = defineStore('store', {
 
       return Math.max(0, Math.min(7, active.item.rating || 0))
     },
-    activeTileAttachment(state): string {
+    activeTileAttachment(_state): string {
       const active = this.activeTile
       const isThoughtLikeItem = active && (active.item.itemType === 'thought' || active.item.coverURL === THOUGHT_ICON_URL)
       if (!isThoughtLikeItem) {
@@ -670,6 +1095,65 @@ export const useStore = defineStore('store', {
       }
 
       return active.item.attachmentURL || ''
+    },
+    focusedLayer(state): RelatedLayer | null {
+      if (!state.focusedTileId) {
+        return null
+      }
+      return state.chart.relatedLayers?.[state.focusedTileId] || null
+    },
+    focusedTileCoord(state): { x: number, y: number } | null {
+      if (!state.focusedTileId) {
+        return null
+      }
+      return findItemCoord(state.chart.coordinates || {}, state.focusedTileId)
+    },
+    tileHasLayer(state) {
+      return (tileId: string): boolean => {
+        const layer = state.chart.relatedLayers?.[tileId]
+        return !!layer && Object.keys(layer).length > 0
+      }
+    },
+    layerTileCount(state) {
+      return (tileId: string): number => Object.keys(state.chart.relatedLayers?.[tileId] || {}).length
+    },
+    canMoveTile(state) {
+      return (oldIndex: number, newIndex: number): boolean => {
+        if (oldIndex === newIndex) {
+          return true
+        }
+        const coordinates = state.chart.coordinates || {}
+        const oldCoord = indexToCoord(oldIndex, state.chart.size.x)
+        const newCoord = indexToCoord(newIndex, state.chart.size.x)
+        const oldKey = coordKey(oldCoord.x, oldCoord.y)
+        const newKey = coordKey(newCoord.x, newCoord.y)
+        const movingItem = coordinates[oldKey]
+        if (!movingItem) {
+          return true
+        }
+        const layers = state.chart.relatedLayers
+        if (!layers) {
+          return true
+        }
+
+        // The moving tile's own layer must fit at the destination.
+        const movingLayer = layers[movingItem.id]
+        if (movingLayer && layerLeavesBounds(movingLayer, newCoord, state.chart.size)) {
+          return false
+        }
+
+        // The swap: the displaced tile moves to the old position, so its
+        // layer must fit there too.
+        const existingAtNew = coordinates[newKey]
+        if (existingAtNew) {
+          const displacedLayer = layers[existingAtNew.id]
+          if (displacedLayer && layerLeavesBounds(displacedLayer, oldCoord, state.chart.size)) {
+            return false
+          }
+        }
+
+        return true
+      }
     },
   },
 })

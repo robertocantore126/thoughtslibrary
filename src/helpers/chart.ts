@@ -4,6 +4,7 @@ import type {
   ChartItem,
   Result,
 } from '../types'
+import { v4 as uuidv4 } from 'uuid'
 import { backendBaseUrl } from '../api/config'
 import { createEmptyChart, useStore } from '../store'
 import { inlineStoredImageUrl, isLocalAssetUrl } from './assets'
@@ -37,6 +38,7 @@ export function setImage(url: string): HTMLImageElement {
 export function createChartItem(item: Result): ChartItem {
   if (isBookResult(item)) {
     return {
+      id: uuidv4(),
       title: item.title,
       coverURL: `https://covers.openlibrary.org/b/olid/${item.cover_edition_key}-L.jpg`,
       creator: item.author_name[0],
@@ -45,6 +47,7 @@ export function createChartItem(item: Result): ChartItem {
   else if (isMusicResult(item)) {
     const largestImageIndex = item.image.length - 1
     return {
+      id: uuidv4(),
       title: item.name,
       coverURL: item.image[largestImageIndex]['#text'],
       creator: item.artist,
@@ -52,24 +55,28 @@ export function createChartItem(item: Result): ChartItem {
   }
   else if (isGameResult(item)) {
     return {
+      id: uuidv4(),
       title: item.name,
       coverURL: item.cover,
     }
   }
   else if (isMovieResult(item)) {
     return {
+      id: uuidv4(),
       title: item.title,
       coverURL: `https://image.tmdb.org/t/p/w185/${item.poster_path}`,
     }
   }
   else if (isTVResult(item)) {
     return {
+      id: uuidv4(),
       title: item.name,
       coverURL: `https://image.tmdb.org/t/p/w185/${item.poster_path}`,
     }
   }
   else if (isThoughtResult(item)) {
     return {
+      id: uuidv4(),
       title: item.title || 'Thought',
       coverURL: item.imageURL,
       itemType: 'thought',
@@ -78,6 +85,7 @@ export function createChartItem(item: Result): ChartItem {
   }
   else if (isCustomResult(item)) {
     return {
+      id: uuidv4(),
       title: item.title,
       creator: item.creator,
       coverURL: item.imageURL,
@@ -154,14 +162,10 @@ async function waitForImageLoad(img: HTMLImageElement) {
   }
 
   await new Promise<void>((resolve) => {
-    const cleanup = () => {
+    const onDone = () => {
       img.removeEventListener('load', onDone)
       img.removeEventListener('error', onDone)
       resolve()
-    }
-
-    const onDone = () => {
-      cleanup()
     }
 
     img.addEventListener('load', onDone, { once: true })

@@ -40,13 +40,10 @@ async function callImportCharts(event) {
   await importChart(event)
 }
 
+// Both save paths stay silent on success and loud on failure, matching Ctrl+S.
 async function saveChart() {
   try {
-    const savedPath = await saveCurrentChartToFile()
-
-    if (savedPath) {
-      alert(`Chart saved to ${savedPath}`)
-    }
+    await saveCurrentChartToFile()
   }
   catch (error) {
     console.error(error)
@@ -56,11 +53,7 @@ async function saveChart() {
 
 async function saveChartAs() {
   try {
-    const savedPath = await saveCurrentChartAs()
-
-    if (savedPath) {
-      alert(`Chart saved to ${savedPath}`)
-    }
+    await saveCurrentChartAs()
   }
   catch (error) {
     console.error(error)

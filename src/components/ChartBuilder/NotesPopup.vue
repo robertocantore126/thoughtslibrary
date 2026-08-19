@@ -190,14 +190,33 @@ function handleWindowKeydown(event: KeyboardEvent) {
   }
 }
 
+// Click anywhere outside the popup to dismiss it. This runs on mousedown, which
+// fires before the click that selects a tile - so clicking a different tile
+// closes this popup first and then opens that tile's own note, rather than the
+// two fighting over which one wins.
+function handleWindowPointerDown(event: MouseEvent) {
+  if (!store.notesPopupVisible) {
+    return
+  }
+
+  const target = event.target as Node | null
+  if (target && popupEl.value?.contains(target)) {
+    return
+  }
+
+  store.closeNotesPopup()
+}
+
 onMounted(() => {
   window.addEventListener('keydown', handleWindowKeydown)
+  window.addEventListener('mousedown', handleWindowPointerDown)
   window.addEventListener('scroll', positionPopup, true)
   window.addEventListener('resize', positionPopup)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleWindowKeydown)
+  window.removeEventListener('mousedown', handleWindowPointerDown)
   window.removeEventListener('scroll', positionPopup, true)
   window.removeEventListener('resize', positionPopup)
 })

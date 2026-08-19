@@ -40,9 +40,9 @@ Fix #1 today. Everything else is a weekend.
 ([imports.ts:15](src/helpers/imports.ts#L15)), not scoped per chart:
 
 ```ts
-const LAST_CHART_FILE_PATH_KEY = 'lastChartFilePath'          // :15
-filePath: filePath || getLastChartFilePath() || undefined     // :335
-rememberChartFilePath('filePath' in result ? result.filePath || '' : '')  // :384
+const LAST_CHART_FILE_PATH_KEY = 'lastChartFilePath' // :15
+filePath: filePath || getLastChartFilePath() || undefined // :335
+rememberChartFilePath('filePath' in result ? result.filePath || '' : '') // :384
 ```
 
 And the main process writes straight through with no dialog when a path is present
@@ -263,7 +263,7 @@ lie it's currently hiding, [localStorage.ts:12-14](src/helpers/localStorage.ts#L
 
 ```ts
 export function getActiveChartUuid(): string {
-  return localStorage.getItem('activeChart')   // string | null
+  return localStorage.getItem('activeChart') // string | null
 }
 ```
 

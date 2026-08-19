@@ -8,13 +8,12 @@ import TitlesSidebar from './components/TitlesSidebar.vue'
 import { saveCurrentChartToFile } from './helpers/imports'
 import './global.css'
 
+// Saving is silent on success - Ctrl+S is meant to be a quick, repeatable
+// action, and a confirmation dialog on every press defeats that. Failures
+// still surface, since a save that didn't happen must never pass unnoticed.
 async function saveChartFromHotkey() {
   try {
-    const savedPath = await saveCurrentChartToFile()
-
-    if (savedPath) {
-      alert(`Chart saved to ${savedPath}`)
-    }
+    await saveCurrentChartToFile()
   }
   catch (error) {
     console.error(error)

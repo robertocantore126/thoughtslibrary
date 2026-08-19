@@ -2,6 +2,7 @@
 import type { ComputedRef, CSSProperties } from 'vue'
 import type { ChartItem } from '../../../types'
 import { BIconX } from 'bootstrap-icons-vue'
+import { v4 as uuidv4 } from 'uuid'
 import { computed } from 'vue'
 import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
 import { storeLocalImage } from '../../../helpers/assets'
@@ -11,17 +12,101 @@ const props = defineProps(['item', 'index', 'title', 'number', 'visualRow'])
 
 const store = useStore()
 const BASE_ITEM_SIZE_PX = 130
-const SUPPORTED_IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|webp)(\?.*)?(#.*)?$/i
+const SUPPORTED_IMAGE_EXTENSIONS = /\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$/i
 
-function getTileScale(row: number): number {
+function getTileScale(_row: number): number {
   return 1
 }
+
+const imgStyle: ComputedRef<CSSProperties> = computed(() => ({
+  borderRadius: store.chart.roundCorners ? '10px' : '',
+  boxShadow: store.chart.shadows ? '2px 2px 4px rgba(0,0,0,0.6)' : '',
+}))
+
+const tileCoordinates = computed(() => ({
+  x: (props.index % store.chart.size.x) + 1,
+  y: Math.floor(props.index / store.chart.size.x) + 1,
+}))
+const tileScale = computed(() => getTileScale(Number(props.visualRow) || tileCoordinates.value.y))
+const tileSizePx = computed(() => Math.round(BASE_ITEM_SIZE_PX * tileScale.value))
+const itemStyle: ComputedRef<CSSProperties> = computed(() => ({
+  width: `${tileSizePx.value}px`,
+  minWidth: `${tileSizePx.value}px`,
+}))
+const coverFrameStyle: ComputedRef<CSSProperties> = computed(() => ({
+  width: `${tileSizePx.value}px`,
+  height: `${tileSizePx.value}px`,
+}))
+const titleStyle: ComputedRef<CSSProperties> = computed(() => ({
+  fontSize: `${Math.max(0.62, 0.62 * Math.min(tileScale.value, 1.2))}rem`,
+  lineHeight: `${Math.max(1.2, 1.2 * Math.min(tileScale.value, 1.1))}`,
+}))
+
+const tileKey = computed(() => `${tileCoordinates.value.x},${tileCoordinates.value.y}`)
+const isActiveTile = computed(() => store.activeTileKey === tileKey.value)
+const isFocusedTile = computed(() => !!props.item && store.focusedTileId === props.item.id)
+const isDimmed = computed(() => !!store.focusedTileId && !isFocusedTile.value)
+const rawThoughtAttachmentUrl = computed(() => {
+  const isThoughtLike = props.item?.itemType === 'thought' || props.item?.coverURL === '/thought_tile.svg'
+  if (!isThoughtLike) {
+    return ''
+  }
+
+  return props.item.attachmentURL || ''
+})
+const itemCoverUrl = useResolvedImageUrl(() => props.item?.coverURL)
+const thoughtAttachmentUrl = useResolvedImageUrl(() => rawThoughtAttachmentUrl.value)
+const normalizedRating = computed(() => {
+  const raw = props.item?.rating
+  if (!raw) {
+    return 0
+  }
+
+  return Math.max(1, Math.min(7, Math.round(raw)))
+})
+const shownStars = computed(() => Array.from({ length: normalizedRating.value }, (_, i) => i + 1))
+const ratingColor = computed(() => {
+  if (props.item?.title?.trim().toLowerCase() === 'frusciante') {
+    return '#000000'
+  }
+
+  if (normalizedRating.value <= 4) {
+    return '#ffd84d'
+  }
+  if (normalizedRating.value === 5) {
+    return '#ff9b3d'
+  }
+  if (normalizedRating.value === 6) {
+    return '#b17bff'
+  }
+  return '#63ecff'
+})
 
 function allowDrop(ev: DragEvent) {
   ev.preventDefault()
   if (ev.dataTransfer) {
     const isInternalDrag = Array.from(ev.dataTransfer.types).includes('application/json')
-    ev.dataTransfer.dropEffect = isInternalDrag ? 'move' : 'copy'
+    let dropEffect: DataTransfer['dropEffect'] = isInternalDrag ? 'move' : 'copy'
+
+    if (isInternalDrag) {
+      try {
+        const dragData = JSON.parse(ev.dataTransfer.getData('application/json') || 'null')
+
+        // A layer-tile drag never lands on the grid.
+        if (dragData && typeof dragData.parentId === 'string') {
+          dropEffect = 'none'
+        }
+        else if (dragData && Number.isInteger(dragData.originalIndex) && !store.canMoveTile(dragData.originalIndex, props.index)) {
+          // Moving here would push a layer tile out of bounds.
+          dropEffect = 'none'
+        }
+      }
+      catch {
+        // Malformed payload: keep the default effect.
+      }
+    }
+
+    ev.dataTransfer.dropEffect = dropEffect
   }
 }
 
@@ -29,6 +114,10 @@ function handleDragStart(ev: DragEvent) {
   if (!props.item) {
     return null
   }
+
+  // The notes popup is anchored to its tile, so it would hang over a stale
+  // position for the whole drag. Close it as soon as the drag begins.
+  store.closeNotesPopup()
 
   const dragData = JSON.stringify({
     originalIndex: props.index,
@@ -91,6 +180,7 @@ function isSupportedImageUrl(rawUrl: string): boolean {
 function addDroppedImageToTile(coverURL: string, title: string) {
   store.addItem({
     item: {
+      id: uuidv4(),
       title: title || 'Dropped image',
       coverURL,
     },
@@ -186,72 +276,8 @@ async function handleDrop(ev: DragEvent) {
     return
   }
 
-  if (await tryHandleExternalImageDrop(ev)) {
-    return
-  }
+  await tryHandleExternalImageDrop(ev)
 }
-
-const imgStyle: ComputedRef<CSSProperties> = computed(() => ({
-  borderRadius: store.chart.roundCorners ? '10px' : '',
-  boxShadow: store.chart.shadows ? '2px 2px 4px rgba(0,0,0,0.6)' : '',
-}))
-
-const tileCoordinates = computed(() => ({
-  x: (props.index % store.chart.size.x) + 1,
-  y: Math.floor(props.index / store.chart.size.x) + 1,
-}))
-const tileScale = computed(() => getTileScale(Number(props.visualRow) || tileCoordinates.value.y))
-const tileSizePx = computed(() => Math.round(BASE_ITEM_SIZE_PX * tileScale.value))
-const itemStyle: ComputedRef<CSSProperties> = computed(() => ({
-  width: `${tileSizePx.value}px`,
-  minWidth: `${tileSizePx.value}px`,
-}))
-const coverFrameStyle: ComputedRef<CSSProperties> = computed(() => ({
-  width: `${tileSizePx.value}px`,
-  height: `${tileSizePx.value}px`,
-}))
-const titleStyle: ComputedRef<CSSProperties> = computed(() => ({
-  fontSize: `${Math.max(0.62, 0.62 * Math.min(tileScale.value, 1.2))}rem`,
-  lineHeight: `${Math.max(1.2, 1.2 * Math.min(tileScale.value, 1.1))}`,
-}))
-
-const tileKey = computed(() => `${tileCoordinates.value.x},${tileCoordinates.value.y}`)
-const isActiveTile = computed(() => store.activeTileKey === tileKey.value)
-const rawThoughtAttachmentUrl = computed(() => {
-  const isThoughtLike = props.item?.itemType === 'thought' || props.item?.coverURL === '/thought_tile.svg'
-  if (!isThoughtLike) {
-    return ''
-  }
-
-  return props.item.attachmentURL || ''
-})
-const itemCoverUrl = useResolvedImageUrl(() => props.item?.coverURL)
-const thoughtAttachmentUrl = useResolvedImageUrl(() => rawThoughtAttachmentUrl.value)
-const normalizedRating = computed(() => {
-  const raw = props.item?.rating
-  if (!raw) {
-    return 0
-  }
-
-  return Math.max(1, Math.min(7, Math.round(raw)))
-})
-const shownStars = computed(() => Array.from({ length: normalizedRating.value }, (_, i) => i + 1))
-const ratingColor = computed(() => {
-  if (props.item?.title?.trim().toLowerCase() === 'frusciante') {
-    return '#000000'
-  }
-
-  if (normalizedRating.value <= 4) {
-    return '#ffd84d'
-  }
-  if (normalizedRating.value === 5) {
-    return '#ff9b3d'
-  }
-  if (normalizedRating.value === 6) {
-    return '#b17bff'
-  }
-  return '#63ecff'
-})
 
 function handleTileClick(event: MouseEvent) {
   if ((event.ctrlKey || event.metaKey) && props.item) {
@@ -268,6 +294,14 @@ function handleTileClick(event: MouseEvent) {
   store.selectTile(tileCoordinates.value)
 }
 
+function handleContextMenu() {
+  if (!props.item) {
+    return
+  }
+
+  store.toggleFocus(props.item.id)
+}
+
 function deleteItem() {
   store.addItem({ item: null, index: props.index })
 }
@@ -276,16 +310,25 @@ function deleteItem() {
 <template>
   <div
     :key="props.item ? props.item.coverURL : props.index"
-    :class="`item ${props.item ? '' : 'placeholder'}`"
+    :class="`item ${props.item ? '' : 'placeholder'} ${isFocusedTile ? 'focused' : ''} ${isDimmed ? 'dimmed' : ''}`"
     :data-index="props.index"
-    :draggable="props.item ? 'true' : 'false'"
     :style="props.item ? itemStyle : { ...itemStyle, ...imgStyle }"
     @click="handleTileClick"
-    @dragstart="handleDragStart"
     @dragover="allowDrop"
     @drop="handleDrop"
   >
-    <div :class="`cover-frame ${isActiveTile ? 'active-tile' : ''}`" :style="coverFrameStyle">
+    <!-- The cover is the drag handle and the right-click target rather than the
+    whole tile, so the title below stays selectable and keeps the browser's own
+    context menu for copying. Text inside a draggable element can't be selected -
+    a mousedown-drag there starts a drag instead. Drops still land anywhere on
+    the tile. -->
+    <div
+      :class="`cover-frame ${isActiveTile ? 'active-tile' : ''}`"
+      :style="coverFrameStyle"
+      :draggable="props.item ? 'true' : 'false'"
+      @dragstart="handleDragStart"
+      @contextmenu.prevent="handleContextMenu"
+    >
       <div v-if="shownStars.length > 0" class="rating-indicator" aria-label="Item rating">
         <span
           v-for="star in shownStars"
@@ -296,7 +339,8 @@ function deleteItem() {
           {{ '\u2605' }}
         </span>
       </div>
-      <span v-if="props.item?.notes?.trim()" class="notes-indicator" aria-hidden />
+      <span v-if="props.item && store.tileHasLayer(props.item.id)" class="layer-indicator" aria-hidden />
+      <span v-else-if="props.item?.notes?.trim()" class="notes-indicator" aria-hidden />
       <img
         v-if="thoughtAttachmentUrl"
         :src="thoughtAttachmentUrl"
@@ -336,6 +380,15 @@ function deleteItem() {
   justify-content: flex-start;
   gap: 4px;
   touch-action: pinch-zoom;
+  transition: opacity 200ms ease;
+}
+
+.item.dimmed {
+  opacity: 0.10;
+}
+
+.item.focused {
+  z-index: 2;
 }
 
 .cover-frame {
@@ -358,6 +411,19 @@ function deleteItem() {
   height: 10px;
   border-radius: 2px;
   background: #ff7f50;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.layer-indicator {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #ffd700;
+  background: transparent;
   pointer-events: none;
   z-index: 2;
 }
@@ -439,6 +505,9 @@ function deleteItem() {
 }
 
 .item-title {
+  /* Selectable for copying, but never editable - editing stays in the sidebar. */
+  user-select: text;
+  cursor: text;
   margin: 0;
   font-size: 0.62rem;
   line-height: 1.2;

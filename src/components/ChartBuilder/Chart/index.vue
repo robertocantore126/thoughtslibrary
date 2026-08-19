@@ -7,53 +7,7 @@ import Row from './Row.vue'
 
 const store = useStore()
 
-function getTileSize(): { width: number, height: number } {
-  const rowFlex = document.querySelector('#chart .row-flex')?.getBoundingClientRect()
-  const cols = store.chart.size.x
-
-  if (!rowFlex) {
-    return { width: 1, height: 1 }
-  }
-
-  return {
-    width: rowFlex.width / cols,
-    height: rowFlex.width / cols,
-  }
-}
-
-function getTileCoordinates(event: MouseEvent): { x: number, y: number } {
-  const chartElement = document.querySelector('#chart')
-  const rowFlex = document.querySelector('#chart .row-flex')
-  if (!chartElement || !rowFlex) {
-    return { x: 1, y: 1 }
-  }
-
-  const chartRect = chartElement.getBoundingClientRect()
-  const contentRect = rowFlex.getBoundingClientRect()
-  const localX = event.clientX - contentRect.left
-  const localY = event.clientY - contentRect.top
-  const tileWidth = contentRect.width / store.chart.size.x
-  const tileHeight = tileWidth
-  const x = Math.min(store.chart.size.x, Math.max(1, Math.floor(localX / tileWidth) + 1))
-  const y = Math.min(store.chart.size.y, Math.max(1, Math.floor(localY / tileHeight) + 1))
-
-  return { x, y }
-}
-
-function normalizeSelection(start: { x: number, y: number }, end: { x: number, y: number }) {
-  const x1 = Math.min(start.x, end.x)
-  const x2 = Math.max(start.x, end.x)
-  const y1 = Math.min(start.y, end.y)
-  const y2 = Math.max(start.y, end.y)
-
-  return {
-    x: x1,
-    y: y1,
-    width: x2 - x1 + 1,
-    height: y2 - y1 + 1,
-  }
-}
-
+const isFocusMode = computed(() => !!store.focusedTileId)
 
 function getBackgroundStyle(chart: Chart): CSSProperties {
   if (chart.backgroundType === BackgroundTypes.Color) {
@@ -120,7 +74,7 @@ const visualRows = computed<VisualRow[]>(() => {
       :style="chartStyle"
     >
       <div v-if="store.chart.title">
-        <p class="chart-title" :style="chartTitleStyle">
+        <p class="chart-title" :class="{ 'focus-dimmed': isFocusMode }" :style="chartTitleStyle">
           {{ store.chart.title }}
         </p>
       </div>
@@ -156,6 +110,11 @@ const visualRows = computed<VisualRow[]>(() => {
   font-size: 50px;
   padding: 0;
   margin: 0;
+}
+
+#chart .chart-title.focus-dimmed {
+  opacity: 0.10;
+  transition: opacity 200ms ease;
 }
 
 #chart .row-flex {

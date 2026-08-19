@@ -155,9 +155,43 @@ export function localStorageMigrations() {
   }
 }
 
+// Assigns an id to every item lacking one, so charts saved before ids existed
+// are repaired at rest. Returns whether any id was assigned.
+function backfillItemIds(chart: StoredPremigrationChart): boolean {
+  let changed = false
+
+  const coordinates = chart.data.coordinates
+  if (coordinates) {
+    for (const item of Object.values(coordinates)) {
+      if (item && !item.id) {
+        item.id = uuidv4()
+        changed = true
+      }
+    }
+  }
+
+  const relatedLayers = chart.data.relatedLayers
+  if (relatedLayers) {
+    for (const layer of Object.values(relatedLayers)) {
+      for (const item of Object.values(layer)) {
+        if (item && !item.id) {
+          item.id = uuidv4()
+          changed = true
+        }
+      }
+    }
+  }
+
+  return changed
+}
+
 // Applies migrations to a single chart and returns whether changes were made
 export function migrateChart(chart: StoredPremigrationChart) {
   let changed = false
+
+  if (backfillItemIds(chart)) {
+    changed = true
+  }
 
   if (!chart.data.backgroundType) {
     chart.data.backgroundType = chart.data.background?.type || BackgroundTypes.Color

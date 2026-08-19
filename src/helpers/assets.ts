@@ -1,4 +1,4 @@
-import type { Chart, ChartCoordinates, ChartItem, StoredChart } from '../types'
+import type { Chart, ChartCoordinates, ChartItem, RelatedLayer, StoredChart } from '../types'
 import { optimizeImageBlob, readBlobAsDataUrl } from './files'
 
 const DB_NAME = 'thoughtslibrary-assets'
@@ -40,6 +40,19 @@ function cloneItems(
   transform: (item: ChartItem) => Promise<ChartItem>,
 ): Promise<Array<ChartItem | null>> {
   return Promise.all(items.map(async item => (item ? await transform(item) : null)))
+}
+
+function cloneRelatedLayers(
+  relatedLayers: Record<string, RelatedLayer> | undefined,
+  transform: (item: ChartItem) => Promise<ChartItem>,
+): Promise<Record<string, RelatedLayer> | undefined> {
+  if (!relatedLayers) {
+    return Promise.resolve(undefined)
+  }
+
+  return Promise.all(
+    Object.entries(relatedLayers).map(async ([parentId, layer]) => [parentId, await cloneCoordinates(layer, transform)] as const),
+  ).then(entries => Object.fromEntries(entries))
 }
 
 function openAssetDb(): Promise<IDBDatabase | null> {
@@ -226,28 +239,32 @@ async function inlineChartItemAssets(item: ChartItem): Promise<ChartItem> {
 }
 
 export async function persistChartAssets(chart: Chart): Promise<Chart> {
-  const [items, coordinates] = await Promise.all([
+  const [items, coordinates, relatedLayers] = await Promise.all([
     cloneItems(chart.items, persistChartItemAssets),
     cloneCoordinates(chart.coordinates, persistChartItemAssets),
+    cloneRelatedLayers(chart.relatedLayers, persistChartItemAssets),
   ])
 
   return {
     ...chart,
     items,
     coordinates,
+    ...(relatedLayers ? { relatedLayers } : {}),
   }
 }
 
 export async function inlineChartAssets(chart: Chart): Promise<Chart> {
-  const [items, coordinates] = await Promise.all([
+  const [items, coordinates, relatedLayers] = await Promise.all([
     cloneItems(chart.items, inlineChartItemAssets),
     cloneCoordinates(chart.coordinates, inlineChartItemAssets),
+    cloneRelatedLayers(chart.relatedLayers, inlineChartItemAssets),
   ])
 
   return {
     ...chart,
     items,
     coordinates,
+    ...(relatedLayers ? { relatedLayers } : {}),
   }
 }
 
