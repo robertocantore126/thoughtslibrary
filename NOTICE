@@ -1,0 +1,18 @@
+thoughtslibrary
+Fork of topstersorg
+https://github.com/robertocantore126/thoughtslibrary
+
+This project is a modified fork of the "topstersorg" project
+(https://github.com/camdendotlol/topstersorg), originally developed by
+camdendotlol and contributors.
+
+Both the upstream project and this fork are licensed under the GNU Affero
+General Public License, version 3 (AGPL-3.0). A copy of the license text
+is included in the LICENSE file at the root of this repository.
+
+Copyright (C) 2026 rob126 (robertocantore126) — modifications to the fork.
+
+Third-party data providers used by the application (Last.fm, OpenLibrary,
+IGDB, The Movie DB) and their trademarks remain the property of their
+respective owners. This project is not affiliated with or endorsed by any
+of them, nor by topsters.org.
