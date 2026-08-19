@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useResolvedImageUrl } from '../composables/useResolvedImageUrl'
 import { storeLocalImage } from '../helpers/assets'
 import { useStore } from '../store'
@@ -35,26 +35,16 @@ const activeTileAttachment = computed({
 })
 const activeTileCoverUrl = useResolvedImageUrl(() => activeTile.value?.item.coverURL)
 
-const notesTextarea = ref<HTMLTextAreaElement | null>(null)
-const notesEditorOpen = ref(false)
-
-watch(
-  () => store.activeTileKey,
-  () => {
-    notesEditorOpen.value = !!store.activeTileNote.trim()
-  },
-  { immediate: true },
-)
+const hasActiveNote = computed(() => !!store.activeTileNote.trim())
 
 function setHasNotes(hasNotes: boolean) {
   if (!hasNotes) {
     activeTileNote.value = ''
-    notesEditorOpen.value = false
+    store.closeNotesPopup()
     return
   }
 
-  notesEditorOpen.value = true
-  nextTick(() => notesTextarea.value?.focus())
+  store.openNotesPopup()
 }
 
 function updateTitle(event: Event) {
@@ -174,12 +164,12 @@ onUnmounted(() => {
       </template>
       <div class="notes-card">
         <div class="has-notes-row">
-          <label class="notes-label" for="tileNotes">Has notes?</label>
+          <span class="notes-label">Has notes?</span>
           <div class="segmented-control" role="group" aria-label="Has notes">
             <button
               type="button"
               class="segmented-option"
-              :class="{ active: notesEditorOpen }"
+              :class="{ active: hasActiveNote }"
               @click="setHasNotes(true)"
             >
               Yes
@@ -187,21 +177,13 @@ onUnmounted(() => {
             <button
               type="button"
               class="segmented-option"
-              :class="{ active: !notesEditorOpen }"
+              :class="{ active: !hasActiveNote }"
               @click="setHasNotes(false)"
             >
               No
             </button>
           </div>
         </div>
-        <textarea
-          v-show="notesEditorOpen"
-          id="tileNotes"
-          ref="notesTextarea"
-          v-model="activeTileNote"
-          class="notes-area"
-          placeholder="Write notes for this tile..."
-        />
       </div>
       <label class="notes-label">Rating</label>
       <div class="rating-row">
@@ -371,19 +353,6 @@ h2 {
 .segmented-option.active:hover {
   background: var(--accent);
   cursor: default;
-}
-
-.notes-area {
-  width: 100%;
-  min-height: 140px;
-  resize: vertical;
-  background: #1e1e1e;
-  color: #ffffff;
-  border: 1px solid #444444;
-  border-radius: 6px;
-  padding: 8px;
-  font-family: "Nunito", sans-serif;
-  font-size: 0.9rem;
 }
 
 .rating-row {

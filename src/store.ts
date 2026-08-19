@@ -329,6 +329,11 @@ export const useStore = defineStore('store', {
     closeNotesPopup() {
       this.notesPopupKey = null
     },
+    openNotesPopup() {
+      if (this.activeTileKey) {
+        this.notesPopupKey = this.activeTileKey
+      }
+    },
     clearActiveTile() {
       this.activeTileKey = null
       this.notesPopupKey = null
@@ -645,6 +650,9 @@ export const useStore = defineStore('store', {
       }
 
       return state.chart.coordinates?.[state.activeTileKey]?.notes?.trim() || ''
+    },
+    notesPopupVisible(state): boolean {
+      return !!state.activeTileKey && state.notesPopupKey === state.activeTileKey
     },
     activeTileRating(state): number {
       const active = this.activeTile

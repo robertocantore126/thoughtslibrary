@@ -7,6 +7,7 @@ import { BackgroundTypes } from '../types'
 import { inlineStoredChartAssets, persistChartAssets } from './assets'
 import { forceRefresh } from './chart'
 import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
+import { markdownToPlainText } from './markdown'
 import { MAX_CHART_DIMENSION } from '../store'
 import { backendBaseUrl } from '../api/config'
 import { inlineStoredImageUrl, isLocalAssetUrl } from './assets'
@@ -212,7 +213,7 @@ function getTilePdfEntries(chart: StoredChart['data']) {
     entries.push({
       key: tileLabel,
       title,
-      text: sanitizePdfText(item.notes || ''),
+      text: sanitizePdfText(markdownToPlainText(item.notes || '')),
     })
   })
 
