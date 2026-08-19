@@ -18,6 +18,9 @@ export interface State {
   notesPopupKey: Selection | null
   focusedTileId: string | null
   resizeBlockMessage: string | null
+  // Timestamp of the last successful save to a file. Bumped on every save so a
+  // repeated save re-triggers the confirmation, even to the same path.
+  lastSavedAt: number | null
   textUndoStack: TextUndoEntry[]
   isApplyingTextUndo: boolean
 }
@@ -380,6 +383,7 @@ export const initialState = {
   notesPopupKey: null,
   focusedTileId: null,
   resizeBlockMessage: null,
+  lastSavedAt: null,
   textUndoStack: [],
   isApplyingTextUndo: false,
 } as State
@@ -583,6 +587,9 @@ export const useStore = defineStore('store', {
       const item = this.chart.coordinates?.[key]
       this.selection = item ? { kind: 'tile', key } : null
       this.notesPopupKey = item && item.notes?.trim() ? { kind: 'tile', key } : null
+    },
+    markChartSaved() {
+      this.lastSavedAt = Date.now()
     },
     closeNotesPopup() {
       this.notesPopupKey = null

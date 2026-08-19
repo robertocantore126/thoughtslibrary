@@ -6,7 +6,7 @@ import type { ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } fr
 import { createApp } from 'vue'
 import { backendBaseUrl } from '../api/config'
 import PrintDocument from '../components/PrintDocument.vue'
-import { MAX_CHART_DIMENSION } from '../store'
+import { MAX_CHART_DIMENSION, useStore } from '../store'
 import { BackgroundTypes } from '../types'
 import { inlineStoredChartAssets, inlineStoredImageUrl, isLocalAssetUrl, persistChartAssets } from './assets'
 import { forceRefresh } from './chart'
@@ -503,6 +503,11 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
   if (savedPath && !savedViaHandle) {
     rememberChartFilePath(uuid, savedPath)
   }
+
+  // Reaching here means the write succeeded - cancels and failures returned or
+  // threw above. Drives the transient "Saved" confirmation in the top bar.
+  useStore().markChartSaved()
+
   return savedPath || null
 }
 

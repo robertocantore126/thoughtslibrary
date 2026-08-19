@@ -3,7 +3,7 @@
 import type { Ref } from 'vue'
 import type { StoredChart } from '../../types'
 import { BIconArrowRepeat, BIconFileEarmarkArrowDown } from 'bootstrap-icons-vue'
-import { ref } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { downloadChart, initializeFirstRun } from '../../helpers/chart'
 import { appendChart, destroyChart, getActiveChartUuid, getNewestChartUuid, getStoredCharts, setActiveChart } from '../../helpers/localStorage'
 import { createEmptyChart, useStore } from '../../store'
@@ -14,6 +14,34 @@ const store = useStore()
 // Keep track of loading so the user knows why it's taking a while.
 // Also, we can prevent the user from spamming the button to generate multiple requests.
 const loading: Ref<boolean> = ref(false)
+
+// Transient "Saved" confirmation. Ctrl+S is silent otherwise, so this is the
+// only signal that an overwrite actually happened.
+const showSaved: Ref<boolean> = ref(false)
+let savedTimer: ReturnType<typeof setTimeout> | null = null
+
+watch(() => store.lastSavedAt, (savedAt) => {
+  if (!savedAt) {
+    return
+  }
+
+  showSaved.value = true
+
+  if (savedTimer) {
+    clearTimeout(savedTimer)
+  }
+
+  savedTimer = setTimeout(() => {
+    showSaved.value = false
+    savedTimer = null
+  }, 1800)
+})
+
+onUnmounted(() => {
+  if (savedTimer) {
+    clearTimeout(savedTimer)
+  }
+})
 
 async function saveChart() {
   loading.value = true
@@ -70,6 +98,9 @@ function deleteChart() {
       >
         +
       </button>
+      <Transition name="saved-fade">
+        <span v-if="showSaved" class="saved-indicator" role="status">Saved</span>
+      </Transition>
     </div>
     <button
       v-if="!loading"
@@ -136,6 +167,25 @@ function deleteChart() {
   justify-content: center;
   gap: 12px;
   align-items: center;
+}
+
+.saved-indicator {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #7ee08a;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.saved-fade-enter-active,
+.saved-fade-leave-active {
+  transition: opacity 220ms ease;
+}
+
+.saved-fade-enter-from,
+.saved-fade-leave-to {
+  opacity: 0;
 }
 
 @keyframes rotation {
