@@ -13,6 +13,18 @@ import { forceRefresh } from './chart'
 import { ensureWritePermission, getRememberedFileHandle, rememberFileHandle, type StoredFileHandle } from './fileHandles'
 import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
 
+// The live Pinia store is the source of truth. Reading the chart back out of
+// localStorage races the debounced write in LocalStorageWatcher, so a save or
+// export issued right after typing would capture the previous version.
+function getActiveChartForOutput(): StoredChart {
+  const stored = getActiveChart()
+
+  return {
+    timestamp: stored?.timestamp ?? Date.now(),
+    data: useStore().chart,
+  }
+}
+
 function getWindowApi() {
   return (window as Window & typeof globalThis & {
     electronAPI?: {
@@ -113,7 +125,7 @@ function base64ToBytes(text: string): Uint8Array {
 
 export async function exportCurrentChart() {
   const uuid = getActiveChartUuid()
-  const activeChart = await inlineStoredChartAssets(getActiveChart())
+  const activeChart = await inlineStoredChartAssets(getActiveChartForOutput())
 
   const exportObj: StoredCharts = {
     [uuid]: activeChart,
@@ -275,7 +287,7 @@ async function waitForPrintImages(root: HTMLElement) {
 }
 
 export async function exportCurrentChartToPdf() {
-  const activeChart = await inlineStoredChartAssets(getActiveChart())
+  const activeChart = await inlineStoredChartAssets(getActiveChartForOutput())
   const chartTitle = sanitizePdfText(activeChart.data.title) || 'chart'
   const chartElement = document.querySelector('#chart') as HTMLElement | null
 
@@ -402,7 +414,7 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
     }
   }
 
-  const activeChart = await inlineStoredChartAssets(getActiveChart())
+  const activeChart = await inlineStoredChartAssets(getActiveChartForOutput())
 
   const exportObj: StoredCharts = {
     [uuid]: activeChart,
