@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useResolvedImageUrl } from '../composables/useResolvedImageUrl'
 import { storeLocalImage } from '../helpers/assets'
 import { useStore } from '../store'
@@ -34,6 +34,28 @@ const activeTileAttachment = computed({
   set: (value: string) => store.setActiveTileAttachment(value),
 })
 const activeTileCoverUrl = useResolvedImageUrl(() => activeTile.value?.item.coverURL)
+
+const notesTextarea = ref<HTMLTextAreaElement | null>(null)
+const notesEditorOpen = ref(false)
+
+watch(
+  () => store.activeTileKey,
+  () => {
+    notesEditorOpen.value = !!store.activeTileNote.trim()
+  },
+  { immediate: true },
+)
+
+function setHasNotes(hasNotes: boolean) {
+  if (!hasNotes) {
+    activeTileNote.value = ''
+    notesEditorOpen.value = false
+    return
+  }
+
+  notesEditorOpen.value = true
+  nextTick(() => notesTextarea.value?.focus())
+}
 
 function updateTitle(event: Event) {
   store.setActiveTileTitle((event.target as HTMLInputElement).value)
@@ -150,8 +172,37 @@ onUnmounted(() => {
           </button>
         </div>
       </template>
-      <label class="notes-label" for="tileNotes">Notes</label>
-      <textarea id="tileNotes" v-model="activeTileNote" class="notes-area" placeholder="Write notes for this tile..." />
+      <div class="notes-card">
+        <div class="has-notes-row">
+          <label class="notes-label" for="tileNotes">Has notes?</label>
+          <div class="segmented-control" role="group" aria-label="Has notes">
+            <button
+              type="button"
+              class="segmented-option"
+              :class="{ active: notesEditorOpen }"
+              @click="setHasNotes(true)"
+            >
+              Yes
+            </button>
+            <button
+              type="button"
+              class="segmented-option"
+              :class="{ active: !notesEditorOpen }"
+              @click="setHasNotes(false)"
+            >
+              No
+            </button>
+          </div>
+        </div>
+        <textarea
+          v-show="notesEditorOpen"
+          id="tileNotes"
+          ref="notesTextarea"
+          v-model="activeTileNote"
+          class="notes-area"
+          placeholder="Write notes for this tile..."
+        />
+      </div>
       <label class="notes-label">Rating</label>
       <div class="rating-row">
         <button
@@ -269,6 +320,57 @@ h2 {
   display: block;
   margin-bottom: 6px;
   font-size: 0.85rem;
+}
+
+.notes-card {
+  border: 1px solid rgba(255, 127, 80, 0.35);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(255, 127, 80, 0.06);
+  margin-bottom: 12px;
+}
+
+.has-notes-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.notes-card .notes-label {
+  margin-bottom: 0;
+}
+
+.segmented-control {
+  display: flex;
+  border: 1px solid #444444;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented-option {
+  appearance: none;
+  border: none;
+  background: #1b1b1b;
+  color: #aaaaaa;
+  padding: 5px 14px;
+  font-size: 0.8rem;
+  line-height: 1.2;
+}
+
+.segmented-option:hover {
+  cursor: pointer;
+  background: #333333;
+}
+
+.segmented-option.active {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.segmented-option.active:hover {
+  background: var(--accent);
+  cursor: default;
 }
 
 .notes-area {

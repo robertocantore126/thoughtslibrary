@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import Chart from './Chart/index.vue'
+import NotesPopup from './NotesPopup.vue'
 import TopBar from './TopBar.vue'
 </script>
 
@@ -9,6 +10,7 @@ import TopBar from './TopBar.vue'
       <TopBar />
       <Chart />
     </div>
+    <NotesPopup />
   </div>
 </template>
 
@@ -18,6 +20,7 @@ import TopBar from './TopBar.vue'
   padding: 0;
   height: 100%;
   min-width: 0;
+  position: relative;
 }
 
 .chart-builder-contents {
