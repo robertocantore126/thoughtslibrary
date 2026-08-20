@@ -8,16 +8,12 @@ import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
 import { storeLocalImage } from '../../../helpers/assets'
 import { useStore } from '../../../store'
 
-const props = defineProps(['item', 'index', 'title', 'number', 'visualRow'])
+const props = defineProps(['item', 'index', 'title', 'number'])
 
 const store = useStore()
 const BASE_ITEM_SIZE_PX = 130
 let dragImageContainer: HTMLElement | null = null
 const SUPPORTED_IMAGE_EXTENSIONS = /\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$/i
-
-function getTileScale(_row: number): number {
-  return 1
-}
 
 const imgStyle: ComputedRef<CSSProperties> = computed(() => ({
   borderRadius: store.chart.roundCorners ? '10px' : '',
@@ -28,20 +24,18 @@ const tileCoordinates = computed(() => ({
   x: (props.index % store.chart.size.x) + 1,
   y: Math.floor(props.index / store.chart.size.x) + 1,
 }))
-const tileScale = computed(() => getTileScale(Number(props.visualRow) || tileCoordinates.value.y))
-const tileSizePx = computed(() => Math.round(BASE_ITEM_SIZE_PX * tileScale.value))
-const itemStyle: ComputedRef<CSSProperties> = computed(() => ({
-  width: `${tileSizePx.value}px`,
-  minWidth: `${tileSizePx.value}px`,
-}))
-const coverFrameStyle: ComputedRef<CSSProperties> = computed(() => ({
-  width: `${tileSizePx.value}px`,
-  height: `${tileSizePx.value}px`,
-}))
-const titleStyle: ComputedRef<CSSProperties> = computed(() => ({
-  fontSize: `${Math.max(0.62, 0.62 * Math.min(tileScale.value, 1.2))}rem`,
-  lineHeight: `${Math.max(1.2, 1.2 * Math.min(tileScale.value, 1.1))}`,
-}))
+const itemStyle: CSSProperties = {
+  width: `${BASE_ITEM_SIZE_PX}px`,
+  minWidth: `${BASE_ITEM_SIZE_PX}px`,
+}
+const coverFrameStyle: CSSProperties = {
+  width: `${BASE_ITEM_SIZE_PX}px`,
+  height: `${BASE_ITEM_SIZE_PX}px`,
+}
+const titleStyle: CSSProperties = {
+  fontSize: '0.62rem',
+  lineHeight: '1.2',
+}
 
 const tileKey = computed(() => `${tileCoordinates.value.x},${tileCoordinates.value.y}`)
 const isActiveTile = computed(() => store.activeTileKey === tileKey.value)
@@ -133,7 +127,7 @@ function handleDragStart(ev: DragEvent) {
     container.classList.add('dnd-container')
     container.appendChild(dragImg)
 
-    const scaledSize = tileSizePx.value
+    const scaledSize = BASE_ITEM_SIZE_PX
     container.style.height = `${scaledSize}px`
     container.style.width = `${scaledSize}px`
 
@@ -395,7 +389,9 @@ function deleteItem() {
 }
 
 .item.dimmed {
-  opacity: 0.10;
+  /* 0.15 per the related-layers brief; the overlay's backdrop wash darkens
+     the field behind the layer on top of this. */
+  opacity: 0.15;
 }
 
 .item.focused {

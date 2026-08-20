@@ -147,7 +147,9 @@ export function localStorageMigrations() {
   Object.keys(charts).forEach((uuid) => {
     const chart = charts[uuid] as StoredPremigrationChart
 
-    changed = migrateChart(chart)
+    // Accumulate: assigning here overwrote every earlier chart's result, so
+    // with 2+ charts only the last one's migration was ever persisted.
+    changed ||= migrateChart(chart)
   })
 
   if (changed) {

@@ -156,7 +156,9 @@ export interface LastfmChartResponseItem {
     name: string
     mbid: string
   }
-  'image': {
+  // The API documents image as always present, but a malformed response can
+  // omit the array entirely — callers must not dereference it unguarded.
+  'image'?: {
     'size': 'small' | 'medium' | 'large' | 'extralarge'
     '#text': string
   }[]

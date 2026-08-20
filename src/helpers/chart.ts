@@ -98,6 +98,18 @@ export function createChartItem(item: Result): ChartItem {
 
 export async function downloadChart(): Promise<void> {
   const html2Canvas = await import('html2canvas')
+
+  // Focus mode dims the grid and keeps the layer outside #chart, so a
+  // mid-focus export would capture a dimmed, layer-less chart with no warning.
+  // Exit first and wait out the 200ms dim transition so the capture isn't
+  // taken mid-fade. The wait only matters when focus mode was actually on.
+  const store = useStore()
+  const wasInFocus = store.focusedTileId !== null
+  store.exitFocus()
+  if (wasInFocus) {
+    await new Promise(resolve => setTimeout(resolve, 220))
+  }
+
   const element = document.querySelector('#chart') as HTMLElement
 
   if (!element) {

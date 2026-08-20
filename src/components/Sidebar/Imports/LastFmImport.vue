@@ -33,10 +33,16 @@ async function importLastFmChart() {
   const missingCovers: string[] = []
 
   const filtered = results.filter((item: LastfmChartResponseItem) => {
-    const coverURL = item.image.find(i => i.size === 'extralarge')['#text']
+    // An album can come back without an 'extralarge' image — or without the
+    // image array at all; treat that the same as an empty cover rather than
+    // dereferencing undefined.
+    const extralarge = item.image?.find(i => i.size === 'extralarge')
+    const coverURL = extralarge?.['#text'] || ''
 
     if (coverURL === '') {
-      missingCovers.push(`${item.artist.name} - ${item.name}`)
+      // "Album - Album" is unhelpful when the artist is missing; the album
+      // name alone already tells the user what wasn't imported.
+      missingCovers.push(item.artist?.name ? `${item.artist.name} - ${item.name}` : item.name)
       return false
     }
 
@@ -46,12 +52,13 @@ async function importLastFmChart() {
   const newItems = Array.from({ length: MAX_CHART_ITEMS }).fill(null) as ChartItem[]
 
   filtered.forEach((item: LastfmChartResponseItem, idx) => {
-    const coverURL = item.image.find(i => i.size === 'extralarge')['#text']
+    const extralarge = item.image?.find(i => i.size === 'extralarge')
+    const coverURL = extralarge?.['#text'] || ''
 
     newItems[idx] = {
       id: crypto.randomUUID(),
       title: item.name,
-      creator: item.artist.name,
+      creator: item.artist?.name,
       coverURL,
     }
   })
