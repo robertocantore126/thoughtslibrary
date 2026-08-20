@@ -80,25 +80,3 @@ export function renderMarkdown(markdown: string): string {
 export function htmlToMarkdown(html: string): string {
   return turndown.turndown(html)
 }
-
-/**
- * Strip common Markdown markers so notes read as plain text in exports
- * (e.g. the PDF export) without showing raw `**` / `#` / `[]()` syntax.
- */
-export function markdownToPlainText(markdown: string): string {
-  return markdown
-    .replace(/<[^>]*>/g, '')
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/`([^`]*)`/g, '$1')
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/^#{1,6}\s+/gm, '')
-    .replace(/^>\s?/gm, '')
-    .replace(/^\s*[-*+]\s+/gm, '')
-    .replace(/^\s*\d+\.\s+/gm, '')
-    .replace(/[*_]{1,3}([^*_]+)[*_]{1,3}/g, '$1')
-    .replace(/~~([^~]+)~~/g, '$1')
-    .replace(/^-{2,}$/gm, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-}

@@ -12,7 +12,7 @@ const titleInput: Ref<HTMLInputElement> = ref(null)
 const creatorInput: Ref<HTMLInputElement> = ref(null)
 const localFileInput: Ref<HTMLInputElement> = ref(null)
 const localFileName = ref('')
-const SUPPORTED_IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|webp)(\?.*)?(#.*)?$/i
+const SUPPORTED_IMAGE_EXTENSIONS = /\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$/i
 
 function buildTitleFromFilename(name: string): string {
   const noExt = name.replace(/\.[^.]+$/, '')

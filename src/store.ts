@@ -23,6 +23,11 @@ export interface State {
   lastSavedAt: number | null
   textUndoStack: TextUndoEntry[]
   isApplyingTextUndo: boolean
+  // False until a real chart has been loaded into the store. The app renders
+  // nothing until then, but window-level handlers registered outside that gate
+  // — the Ctrl+S hotkey — still fire while `chart` is the blank default, and
+  // must never write that blank over the chart the user actually has.
+  chartLoaded: boolean
 }
 
 export const MAX_CHART_DIMENSION = 60
@@ -119,6 +124,27 @@ function resolveItemAt(chart: Chart, selection: Selection): ChartItem | null {
   return chart.relatedLayers?.[selection.parentId]?.[selection.offset] || null
 }
 
+// The current Selection for an item — its grid cell or its layer cell — or
+// null if the item no longer exists anywhere in the chart. Undo entries are
+// keyed by item id so a move between the edit and the undo can't redirect the
+// restore onto a different tile.
+function findSelectionForItem(chart: Chart, id: string): Selection | null {
+  const coord = findItemCoord(chart.coordinates || {}, id)
+  if (coord) {
+    return { kind: 'tile', key: coordKey(coord.x, coord.y) }
+  }
+
+  for (const [parentId, layer] of Object.entries(chart.relatedLayers || {})) {
+    for (const [offset, item] of Object.entries(layer)) {
+      if (item?.id === id) {
+        return { kind: 'layer', parentId, offset }
+      }
+    }
+  }
+
+  return null
+}
+
 // True if any tile in the layer would fall outside `size` when the layer's
 // parent sits at `coord`.
 function layerLeavesBounds(layer: RelatedLayer, coord: { x: number, y: number }, size: ChartSize): boolean {
@@ -200,6 +226,10 @@ function minDimensionForLayers(chart: Chart, axis: 'x' | 'y'): number {
     if (!parentCoord) {
       continue
     }
+    // The parent's own cell counts too: clamping only on the layer tiles
+    // would let a shrink clip the parent out of the grid while its layer
+    // survives, leaving the layer uneditable.
+    min = Math.max(min, axis === 'x' ? parentCoord.x : parentCoord.y)
     for (const offset of Object.keys(layer)) {
       const delta = parseOffset(offset)
       const absolute = axis === 'x' ? parentCoord.x + delta.x : parentCoord.y + delta.y
@@ -222,7 +252,9 @@ function blockingParentTitles(chart: Chart, axis: 'x' | 'y', minDimension: numbe
     if (!parentCoord) {
       continue
     }
-    let maxAbsolute = 0
+    // The parent's own coordinate pins the minimum when its layer lies toward
+    // the origin, so it counts as a blocker in that case too.
+    let maxAbsolute = axis === 'x' ? parentCoord.x : parentCoord.y
     for (const offset of Object.keys(layer)) {
       const delta = parseOffset(offset)
       const absolute = axis === 'x' ? parentCoord.x + delta.x : parentCoord.y + delta.y
@@ -354,16 +386,34 @@ function normalizeCoordinates(coordinates: ChartCoordinates): ChartCoordinates {
   return normalized
 }
 
-function normalizeRelatedLayers(relatedLayers?: Record<string, RelatedLayer>): Record<string, RelatedLayer> | undefined {
+// Repairs stored layers on load. A layer is only kept when its parent still
+// exists in the grid, and only in-bounds entries survive — plus "0,0", the
+// parent's own cell, which is never a legitimate layer entry (a past bug
+// could create one by dropping onto the focused parent). Anything dropped
+// here is unreachable from the UI and would otherwise pin its images forever.
+function normalizeRelatedLayers(
+  relatedLayers: Record<string, RelatedLayer> | undefined,
+  coordinates: ChartCoordinates,
+  size: ChartSize,
+): Record<string, RelatedLayer> | undefined {
   if (!relatedLayers) {
     return undefined
   }
 
   const normalized: Record<string, RelatedLayer> = {}
   for (const [parentId, layer] of Object.entries(relatedLayers)) {
+    const parentCoord = findItemCoord(coordinates, parentId)
+    if (!parentCoord) {
+      continue
+    }
+
     const normalizedLayer: RelatedLayer = {}
     for (const [offset, item] of Object.entries(layer)) {
-      if (!item) {
+      if (!item || offset === '0,0') {
+        continue
+      }
+      const delta = parseOffset(offset)
+      if (!isInBounds(parentCoord.x + delta.x, parentCoord.y + delta.y, size)) {
         continue
       }
       normalizedLayer[offset] = normalizeChartItem(item)
@@ -386,6 +436,7 @@ export const initialState = {
   lastSavedAt: null,
   textUndoStack: [],
   isApplyingTextUndo: false,
+  chartLoaded: false,
 } as State
 
 export function createEmptyChart(): Chart {
@@ -426,6 +477,10 @@ type TextField = 'title' | 'creator' | 'notes'
 
 interface TextUndoEntry {
   selection: Selection
+  // The edited item's id, so undo resolves by identity rather than position:
+  // a move between the edit and the undo would otherwise restore the value
+  // onto whatever tile now occupies the recorded cell.
+  itemId: string
   field: TextField
   previousValue: string
 }
@@ -446,8 +501,14 @@ export const useStore = defineStore('store', {
         return
       }
 
+      const item = resolveItemAt(this.chart, payload.selection)
+      if (!item) {
+        return
+      }
+
       this.textUndoStack.push({
         selection: payload.selection,
+        itemId: item.id,
         field: payload.field,
         previousValue: payload.previousValue,
       })
@@ -462,14 +523,17 @@ export const useStore = defineStore('store', {
         return
       }
 
-      const item = resolveItemAt(this.chart, lastEdit.selection)
-      if (!item) {
+      // Resolve by the item's id so the undo lands on the tile that was
+      // actually edited, wherever a move has taken it since. An entry whose
+      // item no longer exists is dropped rather than applied to a stranger.
+      const selection = findSelectionForItem(this.chart, lastEdit.itemId)
+      if (!selection) {
         return
       }
 
       this.isApplyingTextUndo = true
 
-      this.chart = applyItemUpdate(this.chart, lastEdit.selection, (current) => {
+      this.chart = applyItemUpdate(this.chart, selection, (current) => {
         if (lastEdit.field === 'title') {
           return {
             ...current,
@@ -495,7 +559,7 @@ export const useStore = defineStore('store', {
           notes: lastEdit.previousValue,
         }
       })
-      this.selection = lastEdit.selection
+      this.selection = selection
       this.isApplyingTextUndo = false
     },
     syncItemsFromCoordinates() {
@@ -577,9 +641,16 @@ export const useStore = defineStore('store', {
         items: itemsFromCoordinates(coords, this.chart.size),
       }
 
-      if (this.selection?.kind === 'tile' && !coords[this.selection.key]) {
-        this.selection = null
-        this.notesPopupKey = null
+      // The selection follows the moved tile, and a swap moves the displaced
+      // tile into the old cell — the same rule moveLayerTile uses, so a drag
+      // never leaves the sidebar editing a tile the user didn't touch.
+      if (this.selection?.kind === 'tile') {
+        if (this.selection.key === oldKey) {
+          this.selection = { kind: 'tile', key: newKey }
+        }
+        else if (existingAtNew && this.selection.key === newKey) {
+          this.selection = { kind: 'tile', key: oldKey }
+        }
       }
     },
     selectTile(payload: { x: number, y: number }) {
@@ -764,6 +835,18 @@ export const useStore = defineStore('store', {
         items: itemsFromCoordinates(this.chart.coordinates || {}, nextSize),
       }
 
+      // The clamp above keeps layer parents in bounds, but a corrupt or
+      // imported chart can already have the focused parent off the grid.
+      // Drop focus rather than let the overlay anchor to a missing cell.
+      const focusedCoord = this.focusedTileId ? findItemCoord(this.chart.coordinates || {}, this.focusedTileId) : null
+      if (focusedCoord && !isInBounds(focusedCoord.x, focusedCoord.y, nextSize)) {
+        this.focusedTileId = null
+        if (this.selection?.kind === 'layer') {
+          this.selection = null
+          this.notesPopupKey = null
+        }
+      }
+
       if (nextHeight !== requestedHeight) {
         const first = blockingTitles[0] || 'A tile'
         const others = blockingTitles.length - 1
@@ -786,6 +869,18 @@ export const useStore = defineStore('store', {
         ...this.chart,
         size: nextSize,
         items: itemsFromCoordinates(this.chart.coordinates || {}, nextSize),
+      }
+
+      // The clamp above keeps layer parents in bounds, but a corrupt or
+      // imported chart can already have the focused parent off the grid.
+      // Drop focus rather than let the overlay anchor to a missing cell.
+      const focusedCoord = this.focusedTileId ? findItemCoord(this.chart.coordinates || {}, this.focusedTileId) : null
+      if (focusedCoord && !isInBounds(focusedCoord.x, focusedCoord.y, nextSize)) {
+        this.focusedTileId = null
+        if (this.selection?.kind === 'layer') {
+          this.selection = null
+          this.notesPopupKey = null
+        }
       }
 
       if (nextWidth !== requestedWidth) {
@@ -833,7 +928,7 @@ export const useStore = defineStore('store', {
         ? { ...payload.coordinates }
         : coordinatesFromItems(payloadItems, width)
       const coordinates = normalizeCoordinates(mergeLegacyNotesIntoCoordinates(baseCoordinates, payload.tileNotes))
-      const relatedLayers = normalizeRelatedLayers(payload.relatedLayers)
+      const relatedLayers = normalizeRelatedLayers(payload.relatedLayers, coordinates, { x: width, y: height })
 
       this.chart = {
         ...payload,
@@ -851,6 +946,7 @@ export const useStore = defineStore('store', {
       this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
+      this.chartLoaded = true
     },
     reset() {
       this.chart = createEmptyChart()
@@ -860,6 +956,7 @@ export const useStore = defineStore('store', {
       this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
+      this.chartLoaded = true
     },
     toggleCollapse() {
       this.collapsed = !this.collapsed
@@ -904,6 +1001,24 @@ export const useStore = defineStore('store', {
       this.chart = chartWithLayers(this.chart, layers)
     },
     setLayerTileItem(p: { parentId: string, offset: string, item: ChartItem | null }) {
+      // Writing an entry validates the target like every other layer write:
+      // a drop for a missing parent, an out-of-bounds cell, or the parent's
+      // own "0,0" offset is a no-op, so corrupt state can't be introduced
+      // from the UI. Removing an entry is always allowed.
+      if (p.item) {
+        if (p.offset === '0,0') {
+          return
+        }
+        const parentCoord = findItemCoord(this.chart.coordinates || {}, p.parentId)
+        if (!parentCoord) {
+          return
+        }
+        const delta = parseOffset(p.offset)
+        if (!isInBounds(parentCoord.x + delta.x, parentCoord.y + delta.y, this.chart.size)) {
+          return
+        }
+      }
+
       const layers = { ...(this.chart.relatedLayers || {}) }
       const layer = { ...(layers[p.parentId] || {}) }
 

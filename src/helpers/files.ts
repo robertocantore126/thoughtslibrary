@@ -78,6 +78,20 @@ export async function optimizeImageBlob(file: Blob): Promise<Blob> {
     let longestSide = Math.min(MAX_IMAGE_DIMENSION, Math.max(img.width, img.height))
     let quality = INITIAL_WEBP_QUALITY
 
+    // An image already smaller than the loop's floor never entered it, and the
+    // old fallback encoded the untouched default 300x150 canvas — a blank
+    // cover, persisted permanently. Under the size budget the original pixels
+    // are kept as-is; otherwise the image is re-encoded at its natural size.
+    if (longestSide < MIN_IMAGE_DIMENSION) {
+      if (file.size <= MAX_OUTPUT_BYTES) {
+        return file
+      }
+      canvas.width = img.width
+      canvas.height = img.height
+      ctx.drawImage(img, 0, 0)
+      return await canvasToBlob(canvas, INITIAL_WEBP_QUALITY)
+    }
+
     while (longestSide >= MIN_IMAGE_DIMENSION) {
       const scale = Math.min(1, longestSide / Math.max(img.width, img.height))
       const width = Math.max(1, Math.round(img.width * scale))

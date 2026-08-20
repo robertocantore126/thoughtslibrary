@@ -45,8 +45,18 @@ onUnmounted(() => {
 
 async function saveChart() {
   loading.value = true
-  await downloadChart()
-  loading.value = false
+  try {
+    await downloadChart()
+  }
+  catch (error) {
+    console.error(error)
+    alert(`Failed to export image: ${error}`)
+  }
+  finally {
+    // A failed downloadChart used to leave the button stuck on "loading..."
+    // forever, since the reset only ran on success.
+    loading.value = false
+  }
 }
 
 function startNewChart() {

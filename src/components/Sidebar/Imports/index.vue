@@ -1,3 +1,4 @@
+<!-- eslint-disable no-alert -->
 <script setup lang="ts">
 import type { Ref } from 'vue'
 import {
@@ -80,13 +81,30 @@ async function saveChartAs() {
   }
 }
 
+// Building the document and waiting on any covers that are still remote URLs
+// takes a few seconds on a large chart, so the button says so rather than
+// looking dead. It also guards against a second export starting mid-flight.
+const isExportingPdf = ref(false)
+
 async function exportChartToPdf() {
+  if (isExportingPdf.value) {
+    return
+  }
+
+  isExportingPdf.value = true
   try {
     await exportCurrentChartToPdf()
   }
   catch (error) {
     console.error(error)
-    alert(`Failed to export PDF: ${error}`)
+    // The trace holds why; point at it rather than leaving the message alone.
+    alert(`Failed to export PDF: ${error}
+
+A diagnostic trace was recorded. To save it, open the browser console and run:
+  window.__savePdfExportTrace()`)
+  }
+  finally {
+    isExportingPdf.value = false
   }
 }
 </script>
@@ -119,10 +137,11 @@ async function exportChartToPdf() {
         <span>Save as...</span>
       </button>
       <button
+        :disabled="isExportingPdf"
         @click="exportChartToPdf"
       >
         <BIconFileEarmarkPdf />
-        <span>Export PDF</span>
+        <span>{{ isExportingPdf ? 'Preparing PDF…' : 'Export PDF' }}</span>
       </button>
       <button
         class="import-button"
@@ -189,6 +208,16 @@ p {
   cursor: pointer;
   color: var(--accent);
   text-decoration: underline;
+}
+
+#import-export button:disabled {
+  opacity: 0.6;
+}
+
+#import-export button:disabled:hover {
+  cursor: progress;
+  color: white;
+  text-decoration: none;
 }
 
 #import-export button svg {

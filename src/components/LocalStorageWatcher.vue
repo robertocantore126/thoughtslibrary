@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Chart } from '../types'
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { collectChartAssetIds, collectUnusedAssets, persistChartAssets } from '../helpers/assets'
 import { initializeFirstRun } from '../helpers/chart'
 import {
@@ -19,6 +19,12 @@ import { useStore } from '../store'
 const store = useStore()
 let hasWarnedStorageQuota = false
 let saveTimer: ReturnType<typeof setTimeout> | null = null
+// The startup load runs an async chain (asset persistence, the unused-blob
+// sweep). The app itself is not rendered until it finishes: before the store
+// holds a real chart, an edit could only ever land on the blank default, and
+// the resulting debounced write would overwrite the saved chart with it. The
+// slot gate below makes that whole class of race impossible.
+const loaded = ref(false)
 // A pending write is bound to the uuid it belongs to. Without that pairing,
 // switching charts inside the debounce window cancelled the first chart's write
 // and flushed the second chart's data in its place, losing the edit.
@@ -94,11 +100,18 @@ onMounted(async () => {
     }),
   )
 
-  setStoredCharts(Object.fromEntries(normalizedEntries))
+  try {
+    setStoredCharts(Object.fromEntries(normalizedEntries))
+  }
+  catch (error) {
+    // A quota or serialization failure here used to abort the whole load,
+    // leaving the user on a silent empty chart with no error at all.
+    console.error('Could not persist startup charts:', error)
+  }
 
-  // Reclaim image blobs no chart points at any more. Deleting a tile or a chart
-  // only ever dropped the reference, so without this sweep the blobs stayed in
-  // IndexedDB forever and storage could only ever grow.
+  // Reclaim image blobs no chart points at any more. Deleting a tile or a
+  // chart only ever dropped the reference, so without this sweep the blobs
+  // stayed in IndexedDB forever and storage could only ever grow.
   try {
     const referenced = new Set<string>()
     for (const [, chart] of normalizedEntries) {
@@ -109,6 +122,11 @@ onMounted(async () => {
   catch (error) {
     console.error('Could not reclaim unused images:', error)
   }
+
+  // Flip the gate before setEntireChart so the app mounts holding the real
+  // chart, never a blank one. The store mutation below happens after this
+  // flag is set, so the subscribe handler treats it as a normal edit.
+  loaded.value = true
 
   const activeChart = getActiveChart()
 
@@ -154,5 +172,5 @@ window.addEventListener('beforeunload', flushPendingChartWrite)
 </script>
 
 <template>
-  <slot />
+  <slot v-if="loaded" />
 </template>

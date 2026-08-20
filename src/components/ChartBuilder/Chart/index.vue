@@ -113,7 +113,8 @@ const visualRows = computed<VisualRow[]>(() => {
 }
 
 #chart .chart-title.focus-dimmed {
-  opacity: 0.10;
+  /* 0.15 per the related-layers brief. */
+  opacity: 0.15;
   transition: opacity 200ms ease;
 }
 

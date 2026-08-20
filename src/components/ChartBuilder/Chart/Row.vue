@@ -10,11 +10,6 @@ const props = defineProps<{
 }>()
 
 const store = useStore()
-const BASE_ITEM_SIZE_PX = 130
-
-function getTileScale(): number {
-  return 1
-}
 
 const rowItems = computed(() => {
   return props.indices.map(index => store.items[index])
@@ -26,7 +21,6 @@ const rowStyle = computed<CSSProperties>(() => ({
   gap: `${rowGap.value}px`,
   width: 'max-content',
 }))
-
 </script>
 
 <template>
@@ -39,7 +33,6 @@ const rowStyle = computed<CSSProperties>(() => ({
         :index="item.originalIndex"
         :title="item.title"
         :number="item.number"
-        :visual-row="props.rowNumber"
       />
     </template>
   </div>

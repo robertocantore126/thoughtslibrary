@@ -14,9 +14,9 @@ declare global {
         error?: string
       }>
       printChartToPdf: (payload: {
-        widthPixels: number
-        heightPixels: number
+        html: string
         title: string
+        assets: Array<{ name: string, bytes: Uint8Array }>
       }) => Promise<{
         success: boolean
         canceled?: boolean

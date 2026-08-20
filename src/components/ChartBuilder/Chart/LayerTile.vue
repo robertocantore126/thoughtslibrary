@@ -298,11 +298,18 @@ async function handleDrop(ev: DragEvent) {
   }
 
   if (dragData && isChartItem(dragData.item)) {
-    store.setLayerTileItem({ parentId: props.parentId, offset: props.offset, item: dragData.item })
+    // The parent is a grid tile, not a layer member, so it takes no layer
+    // drops: writing one here would create a phantom "0,0" entry — invisible,
+    // unreachable, and it pins the chart's minimum size. A no-op.
+    if (!props.isParent) {
+      store.setLayerTileItem({ parentId: props.parentId, offset: props.offset, item: dragData.item })
+    }
     return
   }
 
-  await tryHandleExternalImageDrop(ev)
+  if (!props.isParent) {
+    await tryHandleExternalImageDrop(ev)
+  }
 }
 
 // Releases the offscreen drag image and disarms the overlay's drop targets.

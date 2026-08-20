@@ -34,6 +34,22 @@ function changeChart(event: Event) {
 
   store.setEntireChart(newActiveChart.data)
 }
+
+function optionLabel(uuid: string): string {
+  // The active chart's title comes from the live store: its debounced write
+  // lags the edit by 300ms, so re-reading localStorage would keep showing the
+  // previous title until the next mutation.
+  if (uuid === activeChartUuid.value && store.chart.title) {
+    return store.chart.title
+  }
+
+  const stored = charts.value[uuid]
+  if (stored?.data?.title) {
+    return stored.data.title
+  }
+
+  return `Untitled (${new Date(stored?.timestamp || 0).toUTCString()})`
+}
 </script>
 
 <template>
@@ -49,7 +65,7 @@ function changeChart(event: Event) {
         :value="uuid"
         :selected="uuid === activeChartUuid"
       >
-        {{ charts[uuid]?.data?.title ? charts[uuid]?.data.title : `Untitled (${new Date(charts[uuid]?.timestamp).toUTCString()})` }}
+        {{ optionLabel(uuid) }}
       </option>
     </select>
   </div>

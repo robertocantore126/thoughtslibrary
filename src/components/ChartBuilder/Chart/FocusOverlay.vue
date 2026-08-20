@@ -67,6 +67,10 @@ const emptyOffsets = computed(() => {
   return offsets
 })
 
+// Rendered only during a layer-tile drag, when they are actually drop
+// targets; at rest they would be ~3,600 hidden absolutely-positioned boxes.
+const dropCellOffsets = computed(() => (isDraggingLayerTile.value ? emptyOffsets.value : []))
+
 function handleDropCellDragOver(event: DragEvent) {
   if (!isDraggingLayerTile.value || !event.dataTransfer) {
     return
@@ -105,6 +109,21 @@ function handleDropCellDrop(event: DragEvent, offset: string) {
 
 const hostStyle = reactive({ left: 0, top: 0, width: 0, height: 0 })
 const positions = reactive<Record<string, { left: number, top: number }>>({})
+
+// Geometry is re-read on scroll and resize; both listeners are rAF-throttled
+// so a 60x60 chart doesn't run thousands of getBoundingClientRect calls on
+// every scroll tick.
+let geometryFrame: number | null = null
+
+function scheduleGeometryUpdate() {
+  if (geometryFrame !== null) {
+    return
+  }
+  geometryFrame = requestAnimationFrame(() => {
+    geometryFrame = null
+    updateGeometry()
+  })
+}
 
 function parseOffset(offset: string): { x: number, y: number } {
   const [xRaw, yRaw] = offset.split(',')
@@ -157,7 +176,12 @@ function updateGeometry() {
   const hostLeft = vpRect.left
   const hostTop = vpRect.top
 
-  const offsets = ['0,0', ...layerEntries.value.map(entry => entry.offset), ...emptyOffsets.value]
+  // Empty drop cells are only measured while a drag is live; measuring them
+  // at rest was a getBoundingClientRect per cell on every scroll tick.
+  const offsets = ['0,0', ...layerEntries.value.map(entry => entry.offset)]
+  if (isDraggingLayerTile.value) {
+    offsets.push(...emptyOffsets.value)
+  }
   for (const offset of offsets) {
     const cellRect = getCellRect(offset)
     positions[offset] = {
@@ -238,16 +262,26 @@ watch(
   { immediate: true },
 )
 
+// Drop cells come and go with the drag; their positions need a fresh
+// measurement on each transition.
+watch(isDraggingLayerTile, () => {
+  scheduleGeometryUpdate()
+})
+
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
-  window.addEventListener('scroll', updateGeometry, true)
-  window.addEventListener('resize', updateGeometry)
+  window.addEventListener('scroll', scheduleGeometryUpdate, true)
+  window.addEventListener('resize', scheduleGeometryUpdate)
 })
 
 onUnmounted(() => {
+  if (geometryFrame !== null) {
+    cancelAnimationFrame(geometryFrame)
+    geometryFrame = null
+  }
   window.removeEventListener('keydown', handleKeydown)
-  window.removeEventListener('scroll', updateGeometry, true)
-  window.removeEventListener('resize', updateGeometry)
+  window.removeEventListener('scroll', scheduleGeometryUpdate, true)
+  window.removeEventListener('resize', scheduleGeometryUpdate)
 })
 </script>
 
@@ -273,7 +307,7 @@ onUnmounted(() => {
     <!-- Drop targets for moving a tile within the layer. Inert until a drag
     starts, so they don't intercept the backdrop clicks that exit focus. -->
     <div
-      v-for="offset in emptyOffsets"
+      v-for="offset in dropCellOffsets"
       :key="`empty-${offset}`"
       class="layer-drop-cell"
       :class="{ active: isDraggingLayerTile }"

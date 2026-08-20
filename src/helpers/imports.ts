@@ -3,15 +3,16 @@
 // Functions related to importing and exporting charts
 
 import type { Chart, ChartItem, StoredChart, StoredCharts, StoredPremigrationChart } from '../types'
-import { createApp } from 'vue'
-import { backendBaseUrl } from '../api/config'
-import PrintDocument from '../components/PrintDocument.vue'
 import { MAX_CHART_DIMENSION, useStore } from '../store'
 import { BackgroundTypes } from '../types'
-import { inlineStoredChartAssets, inlineStoredImageUrl, isLocalAssetUrl, persistChartAssets } from './assets'
+import { collectChartExportAssets, inlineStoredChartAssets, persistChartAssets } from './assets'
 import { forceRefresh } from './chart'
+import { type ExportTrace, startExportTrace, summariseChart } from './exportTrace'
 import { ensureWritePermission, getRememberedFileHandle, rememberFileHandle, type StoredFileHandle } from './fileHandles'
 import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
+import { renderMarkdown } from './markdown'
+import { renderFrameToPdf } from './pdfFromDom'
+import { buildPrintDocument, paperSizePx } from './printDocument'
 
 // The live Pinia store is the source of truth. Reading the chart back out of
 // localStorage races the debounced write in LocalStorageWatcher, so a save or
@@ -149,196 +150,265 @@ function getPdfExportApi() {
       printChartToPdf: (payload: {
         html: string
         title: string
+        assets: Array<{ name: string, bytes: Uint8Array }>
+        trace: unknown
       }) => Promise<{
         success: boolean
         canceled?: boolean
         filePath?: string
         error?: string
+        tracePath?: string
+        pdf?: Record<string, unknown>
       }>
     }
   }).electronAPI
 }
 
-async function waitForImageLoad(img: HTMLImageElement) {
-  if (img.complete && img.naturalWidth > 0) {
-    return
-  }
+// Where the print document expects its images to sit relative to itself once
+// the main process has written them out beside it.
+const PRINT_ASSET_DIR = 'assets'
 
-  await new Promise<void>((resolve) => {
-    const onDone = () => {
-      img.removeEventListener('load', onDone)
-      img.removeEventListener('error', onDone)
-      resolve()
-    }
+// How long the print document may wait for fonts and remote cover images
+// before it is printed without them, and how long its own fit pass gets.
+const PRINT_RESOURCE_TIMEOUT_MS = 20000
+// Kept in step with the margin the print document declares for its @page rule.
+const PRINT_MARGIN_MM = 12
+const PRINT_FIT_TIMEOUT_MS = 10000
 
-    img.addEventListener('load', onDone, { once: true })
-    img.addEventListener('error', onDone, { once: true })
-  })
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function inlineLocalImagesForPdfExport(element: HTMLElement): Promise<() => void> {
-  const images = Array.from(element.querySelectorAll('img[data-stored-src]')) as HTMLImageElement[]
-  const originals: Array<{ img: HTMLImageElement, src: string }> = []
+async function waitUntil(ready: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
 
-  for (const img of images) {
-    const storedSrc = img.dataset.storedSrc || ''
-    if (!isLocalAssetUrl(storedSrc)) {
-      continue
+  while (Date.now() < deadline) {
+    if (ready()) {
+      return true
     }
-
-    const inlineSrc = await inlineStoredImageUrl(storedSrc)
-    if (!inlineSrc) {
-      continue
-    }
-
-    originals.push({ img, src: img.src })
-    img.src = inlineSrc
-    await waitForImageLoad(img)
+    await delay(50)
   }
 
-  return () => {
-    for (const entry of originals) {
-      entry.img.src = entry.src
-    }
+  return ready()
+}
+
+// What the print document looks like right now: the numbers that told us the
+// document was being laid out one pixel wide, and which covers never arrived.
+function describePrintDocument(frame: HTMLIFrameElement): Record<string, unknown> {
+  const doc = frame.contentDocument
+  if (!doc) {
+    return { documentReachable: false }
+  }
+
+  const images = Array.from(doc.images)
+  const entry = doc.querySelector('.pl-entry')
+
+  return {
+    layoutViewportWidth: frame.contentWindow?.innerWidth ?? null,
+    documentHeight: doc.documentElement.scrollHeight,
+    entryWidth: entry ? Math.round(entry.getBoundingClientRect().width) : null,
+    tiles: doc.querySelectorAll('.pl-item').length,
+    entries: doc.querySelectorAll('.pl-entry').length,
+    images: images.length,
+    imagesPending: images.filter(img => !img.complete).length,
+    imagesBroken: images.filter(img => img.complete && img.naturalWidth === 0).length,
   }
 }
 
-// The PDF export builds the chart as a hidden print document and hands it to
-// Chromium: in Electron a hidden window runs `printToPDF` on the serialized
-// HTML; on web the same document is printed with `window.print()`. Only rules
-// naming the `print-doc-*` classes are carried over, so the app's own CSS can
-// never leak into the PDF.
-const PRINT_DOC_BASE_CSS = `
-  html, body { margin: 0; padding: 0; background: #ffffff; }
-`
+// Lays the print document out in a hidden frame at the page's content width,
+// writes the PDF from that layout, and saves it. No dialog, no preview.
+//
+// Remote covers are pulled in as blobs first: the renderer needs the actual
+// bytes to embed, and an <img> drawn from another origin would taint the canvas
+// it has to go through.
+async function renderChartPdfInBrowser(
+  html: string,
+  chartTitle: string,
+  trace: ExportTrace,
+): Promise<Record<string, unknown>> {
+  const paper = paperSizePx()
+  const margin = PRINT_MARGIN_MM * 96 / 25.4
 
-// Serialize the print document's styles: everything the PrintDocument
-// component compiled (scoped and plain blocks alike, in dev via injected
-// <style> tags and in production via the extracted CSS files) plus its @page
-// rule. Cross-origin stylesheets (e.g. Google Fonts) are skipped — the print
-// window has no use for them.
-function collectPrintDocumentStyles(): string {
-  const seen = new Set<string>()
-  const rules: string[] = []
-
-  for (const sheet of Array.from(document.styleSheets)) {
-    let cssRules: CSSRule[]
-    try {
-      cssRules = Array.from(sheet.cssRules)
-    }
-    catch {
-      continue
-    }
-
-    for (const rule of cssRules) {
-      const text = rule.cssText
-      if ((text.includes('print-doc') || text.startsWith('@page')) && !seen.has(text)) {
-        seen.add(text)
-        rules.push(text)
-      }
-    }
-  }
-
-  return rules.join('\n')
-}
-
-// Page 1 of the PDF is the chart exactly as the PNG export renders it, so the
-// same html2canvas rasterization is reused (identical options, including the
-// transform-stripping onclone that keeps the full chart in frame).
-async function renderChartImageForPdf(chartElement: HTMLElement): Promise<string> {
-  const restoreChartImages = await inlineLocalImagesForPdfExport(chartElement)
-  const html2Canvas = await import('html2canvas')
-
-  const onclone = (doc: Document) => {
-    const chart = doc.querySelector('#chart') as HTMLElement | null
-    if (chart) {
-      chart.style.transform = 'none'
-      chart.style.maxHeight = '10000px'
-      chart.style.maxWidth = '10000px'
-    }
-
-    const placeholders = doc.querySelectorAll('.placeholder')
-    placeholders.forEach((placeholder) => {
-      const placeholderElement = placeholder as HTMLElement
-      placeholderElement.classList.remove('placeholder')
-      placeholderElement.style.boxShadow = 'none'
-    })
-  }
+  const frame = document.createElement('iframe')
+  frame.setAttribute('aria-hidden', 'true')
+  // The content box, not the sheet: laid out at any other width, every note
+  // would wrap somewhere other than where it ends up in the PDF.
+  frame.style.cssText = `position:fixed;left:-10000px;top:0;border:0;`
+    + `width:${paper.width - margin * 2}px;height:${paper.height}px;`
+  document.body.appendChild(frame)
 
   try {
-    const canvas = await html2Canvas.default(chartElement, {
-      useCORS: true,
-      onclone,
-      proxy: `${backendBaseUrl}/api/proxy`,
-      backgroundColor: '#ffffff',
-      scale: 2,
+    const fullyLoaded = new Promise<void>((resolve) => {
+      frame.addEventListener('load', () => resolve(), { once: true })
+    })
+    frame.srcdoc = html
+    trace.mark('frame:srcdoc-set', { htmlBytes: html.length, width: paper.width - margin * 2 })
+
+    const fitted = await waitUntil(
+      () => !!frame.contentDocument?.documentElement.hasAttribute('data-fitted'),
+      PRINT_FIT_TIMEOUT_MS,
+    )
+    trace.mark('document:fitted', { fitted, ...describePrintDocument(frame) })
+
+    let everyResourceArrived = false
+    await Promise.race([
+      fullyLoaded.then(() => { everyResourceArrived = true }),
+      delay(PRINT_RESOURCE_TIMEOUT_MS),
+    ])
+    trace.mark('resources:settled', { everyResourceArrived, ...describePrintDocument(frame) })
+
+    const rendered = await renderFrameToPdf(frame, {
+      paper,
+      margin,
+      onProgress: (stage, data) => trace.mark(stage, data),
     })
 
-    return canvas.toDataURL('image/png')
+    saveBlob(rendered.blob, `${normalizeChartTitle(chartTitle)}.pdf`)
+
+    return {
+      pages: rendered.pages,
+      images: rendered.images,
+      textRuns: rendered.textRuns,
+      bytes: rendered.blob.size,
+      failedImages: rendered.failedImages,
+      writtenBy: 'in-page renderer',
+    }
   }
   finally {
-    restoreChartImages()
+    frame.remove()
   }
 }
 
-async function waitForPrintImages(root: HTMLElement) {
-  const images = Array.from(root.querySelectorAll('img'))
-  await Promise.all(images.map(waitForImageLoad))
+function saveBlob(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
 export async function exportCurrentChartToPdf() {
-  const activeChart = await inlineStoredChartAssets(getActiveChartForOutput())
-  const chartTitle = sanitizePdfText(activeChart.data.title) || 'chart'
-  const chartElement = document.querySelector('#chart') as HTMLElement | null
-
-  if (!chartElement) {
-    throw new Error('Chart not found')
-  }
-
-  const chartImage = await renderChartImageForPdf(chartElement)
-
-  // Build the hidden print document. It is mounted in the live DOM so the Vue
-  // component's styles are compiled and injected exactly as in the app, then
-  // serialized into a standalone page for the print window (or printed in
-  // place on web, where the print stylesheet hides the app around it).
-  const host = document.createElement('div')
-  host.className = 'print-doc-root'
-  host.id = 'print-host'
-  document.body.appendChild(host)
-
-  const printApp = createApp(PrintDocument, {
-    chart: activeChart.data,
-    chartImage,
-  })
-  printApp.mount(host)
-  await waitForPrintImages(host)
+  const trace = startExportTrace()
 
   try {
+    const source = getActiveChartForOutput().data
+    const chartTitle = sanitizePdfText(source.title) || 'chart'
     const printApi = getPdfExportApi()?.printChartToPdf
+    trace.mark('chart:read', summariseChart(source))
 
     if (printApi) {
-      // The collected rules are raw CSS text; they must be wrapped in a
-      // <style> tag or the standalone print window would render them as
-      // literal text and the document would come out unstyled.
-      const html = `<style>${PRINT_DOC_BASE_CSS}${collectPrintDocumentStyles()}</style>${host.innerHTML}`
-      const result = await printApi({ html, title: chartTitle })
+      // Desktop: the assets travel as bytes and the main process writes them
+      // beside the document, so the HTML carries a short path per image instead
+      // of a full copy of it.
+      const { chart, assets } = await collectChartExportAssets(
+        source,
+        asset => `${PRINT_ASSET_DIR}/${asset.name}`,
+      )
+      trace.mark('assets:collected', {
+        distinctAssets: assets.length,
+        totalBytes: assets.reduce((total, asset) => total + asset.blob.size, 0),
+        types: assets.reduce<Record<string, number>>((counts, asset) => {
+          const type = asset.blob.type || 'unknown'
+          counts[type] = (counts[type] || 0) + 1
+          return counts
+        }, {}),
+      })
+
+      const html = buildPrintDocument(chart, {
+        renderNotes: renderMarkdown,
+        title: chartTitle,
+        // Only the desktop path gets a chart sheet of its own: it runs on a
+        // known Chromium, whereas named-page support is uneven across browsers
+        // and one that ignores it would print the chart onto the wrong sheet.
+        posterPage: 'exact',
+      })
+      trace.mark('document:built', { htmlBytes: html.length, posterPage: 'exact' })
+
+      const payload = await Promise.all(assets.map(async asset => ({
+        name: asset.name,
+        bytes: new Uint8Array(await asset.blob.arrayBuffer()),
+      })))
+      trace.mark('assets:serialized', {
+        count: payload.length,
+        bytes: payload.reduce((total, asset) => total + asset.bytes.byteLength, 0),
+      })
+
+      const result = await printApi({
+        html,
+        title: chartTitle,
+        assets: payload,
+        // The main process appends what it sees and writes the whole thing out.
+        trace: trace.snapshot(),
+      })
+      trace.mark('main:returned', {
+        success: result.success,
+        canceled: result.canceled || false,
+        error: result.error || null,
+        tracePath: result.tracePath || null,
+        ...(result.pdf || {}),
+      })
 
       if (!result.success) {
-        if ('canceled' in result && result.canceled) {
+        if (result.canceled) {
+          trace.finish('canceled')
           return
         }
-        throw new Error('error' in result && result.error ? result.error : 'Failed to export PDF')
+        throw new Error(result.error || 'Failed to export PDF')
       }
+
+      trace.finish('ok', { savedTo: result.filePath || null })
       return
     }
 
-    // Web fallback: the browser's own print dialog produces the PDF from the
-    // same document.
-    window.print()
+    // Web: no print dialog. The document is laid out in a hidden frame at the
+    // page's content width, and the PDF is written from that layout directly,
+    // so the file is saved without a preview and without a destination to pick.
+    const objectUrls: string[] = []
+    const release = () => objectUrls.forEach(URL.revokeObjectURL)
+
+    try {
+      const { chart } = await collectChartExportAssets(
+        source,
+        (asset) => {
+          const url = URL.createObjectURL(asset.blob)
+          objectUrls.push(url)
+          return url
+        },
+      )
+      trace.mark('assets:collected', { distinctAssets: objectUrls.length })
+
+      const html = buildPrintDocument(chart, {
+        renderNotes: renderMarkdown,
+        title: chartTitle,
+        posterPage: 'off',
+      })
+      trace.mark('document:built', { htmlBytes: html.length, posterPage: 'off' })
+
+      const result = await renderChartPdfInBrowser(html, chartTitle, trace)
+      const failedImages = Number(result.failedImages || 0)
+      if (failedImages > 0) {
+        // A cover that fails to fetch (usually CORS on a user-entered URL)
+        // used to vanish from the PDF with only a counter in the trace.
+        alert(`Some covers could not be loaded and were left out of the PDF (${failedImages} image(s)). Check the export trace for details.`)
+      }
+      trace.finish('ok', result)
+    }
+    catch (error) {
+      release()
+      throw error
+    }
+
+    release()
   }
-  finally {
-    printApp.unmount()
-    host.remove()
+  catch (error) {
+    trace.fail('export', error)
+    trace.finish('failed')
+    throw error
   }
 }
 
@@ -399,6 +469,15 @@ export async function saveCurrentChartAs(): Promise<string | null> {
 }
 
 async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<string | null> {
+  // The Ctrl+S hotkey lives on window, outside the gate that keeps the app
+  // unrendered until the initial load finishes, so it can fire while the store
+  // still holds the blank default chart. Writing that through would overwrite
+  // the user's saved file with an empty chart: the uuid comes from storage and
+  // matches, so the "still the same chart" check below would wave it past.
+  if (!useStore().chartLoaded) {
+    return null
+  }
+
   const uuid = getActiveChartUuid()
 
   // Resolve the browser write target FIRST, before the asset inlining and
