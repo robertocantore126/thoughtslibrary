@@ -24,6 +24,12 @@ export interface State {
   lastSavedAt: number | null
   textUndoStack: TextUndoEntry[]
   isApplyingTextUndo: boolean
+  // Whole-chart snapshots for Ctrl+Z on tile moves and connection arrows.
+  // Snapshot-based rather than inverse-operation, so a move that pruned
+  // dangling links is reversed by restoring the chart, not by replaying
+  // anything. Every mutation replaces `chart` wholesale, so a stored
+  // reference is already a complete immutable snapshot — no deep clone.
+  chartUndoStack: Chart[]
   // False until a real chart has been loaded into the store. The app renders
   // nothing until then, but window-level handlers registered outside that gate
   // — the Ctrl+S hotkey — still fire while `chart` is the blank default, and
@@ -501,6 +507,7 @@ export const initialState = {
   lastSavedAt: null,
   textUndoStack: [],
   isApplyingTextUndo: false,
+  chartUndoStack: [],
   chartLoaded: false,
 } as State
 
@@ -627,6 +634,35 @@ export const useStore = defineStore('store', {
       this.selection = selection
       this.isApplyingTextUndo = false
     },
+    // Pushes the current chart onto the structural undo stack. Only called
+    // from the move/link actions after their guards, so a refused operation
+    // never burns an undo press on a no-op. The cap mirrors textUndoStack.
+    recordChartChange() {
+      this.chartUndoStack.push(this.chart)
+
+      if (this.chartUndoStack.length > 300) {
+        this.chartUndoStack = this.chartUndoStack.slice(this.chartUndoStack.length - 300)
+      }
+    },
+    // Restores the chart from the most recent snapshot. A position-keyed
+    // restore would land on whatever tile now occupies the recorded cell, so
+    // the whole chart is swapped in instead — a tile moved since the snapshot
+    // comes back in its original place along with everything else. Selection
+    // is only cleared when it points at a cell the restored chart no longer
+    // fills; an item that simply moved is reselected at its old home.
+    undoChartChange() {
+      const previous = this.chartUndoStack.pop()
+      if (!previous) {
+        return
+      }
+
+      this.chart = previous
+
+      if (this.selection && !resolveItemAt(this.chart, this.selection)) {
+        this.selection = null
+        this.notesPopupKey = null
+      }
+    },
     syncItemsFromCoordinates() {
       this.chart = {
         ...this.chart,
@@ -694,6 +730,8 @@ export const useStore = defineStore('store', {
         return
       }
 
+      this.recordChartChange()
+
       this.chart = chartWithLinks(this.chart, [...links, { from: p.from, to: p.to }])
     },
     removeTileLink(p: { from: string, to: string }) {
@@ -706,6 +744,8 @@ export const useStore = defineStore('store', {
       if (kept.length === links.length) {
         return
       }
+
+      this.recordChartChange()
 
       this.chart = chartWithLinks(this.chart, kept)
     },
@@ -735,6 +775,12 @@ export const useStore = defineStore('store', {
       }
 
       coords[newKey] = movingItem
+
+      // A drop onto the tile's own cell passes every guard above but changes
+      // nothing, so it must not spend an undo press.
+      if (payload.oldIndex !== payload.newIndex) {
+        this.recordChartChange()
+      }
 
       this.chart = {
         ...this.chart,
@@ -1047,6 +1093,7 @@ export const useStore = defineStore('store', {
       this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
+      this.chartUndoStack = []
       this.chartLoaded = true
     },
     reset() {
@@ -1057,6 +1104,7 @@ export const useStore = defineStore('store', {
       this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
+      this.chartUndoStack = []
       this.chartLoaded = true
     },
     toggleCollapse() {
@@ -1171,6 +1219,13 @@ export const useStore = defineStore('store', {
       }
 
       layers[p.parentId] = layer
+
+      // Both drop paths already refuse a drop onto the tile's own cell; the
+      // guard is defensive so a no-op move never consumes an undo press.
+      if (p.fromOffset !== p.toOffset) {
+        this.recordChartChange()
+      }
+
       this.chart = chartWithLayers(this.chart, layers)
 
       if (this.selection?.kind === 'layer' && this.selection.parentId === p.parentId) {

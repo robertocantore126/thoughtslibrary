@@ -111,13 +111,30 @@ function handleUndoHotkey(event: KeyboardEvent) {
   }
 
   const activeEl = document.activeElement as HTMLElement | null
-  const isTextField = !!activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')
-  if (!isTextField) {
+
+  // The notes editor is a contenteditable div rather than an input, so it
+  // falls through every tagName test below. Its Ctrl+Z is the browser's own
+  // rich-text history, which this handler must neither prevent nor replace:
+  // preventing it left typing un-undoable, and falling through to the chart
+  // undo destroyed an unrelated arrow while the user was writing a note.
+  if (activeEl?.isContentEditable) {
     return
   }
 
+  // Inside a text field, Ctrl+Z belongs to the field's own text history;
+  // outside one it undoes the last structural change (a move or an arrow).
+  // The two stacks are separate, so an edit followed by a move undoes each
+  // in turn. preventDefault stops the browser from undoing the field's last
+  // input after the store already restored the value.
   event.preventDefault()
-  store.undoTextEdit()
+
+  const isTextField = !!activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')
+  if (isTextField) {
+    store.undoTextEdit()
+    return
+  }
+
+  store.undoChartChange()
 }
 
 onMounted(() => {
