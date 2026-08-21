@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { computed } from 'vue'
 import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
 import { resolveDroppedImage } from '../../../helpers/imageDrop'
+import { isLinkDrag, readLinkSourceId, startLinkDrag } from '../../../helpers/linkDrag'
 import { useStore } from '../../../store'
 
 const props = defineProps<{
@@ -221,6 +222,15 @@ function handleDragStart(ev: DragEvent) {
 
   // Same as the grid tiles: the popup is anchored, so drop it on drag start.
   store.closeNotesPopup()
+
+  // Shift draws an arrow instead of moving the tile. The overlay's empty-cell
+  // drop targets stay disarmed for it — a link has nowhere to land on an empty
+  // cell, and arming them would only put dead targets under the pointer.
+  if (ev.shiftKey) {
+    startLinkDrag(ev, props.item.id)
+    return
+  }
+
   emit('dragStateChange', true)
 
   if (ev.dataTransfer) {
@@ -257,6 +267,13 @@ function allowDrop(ev: DragEvent) {
     return
   }
 
+  // A link drag is identifiable from `types` alone. The parent is a grid tile
+  // rather than a layer member, so it is never a legal end for a layer arrow.
+  if (isLinkDrag(dataTransfer)) {
+    dataTransfer.dropEffect = props.isParent ? 'none' : 'link'
+    return
+  }
+
   // getData() is unreadable here: the drag data store stays in protected mode
   // until the drop event, so the payload cannot be inspected during dragover.
   // Only types and effectAllowed are available, and reporting an effect the
@@ -275,6 +292,16 @@ function allowDrop(ev: DragEvent) {
 
 async function handleDrop(ev: DragEvent) {
   ev.preventDefault()
+
+  if (isLinkDrag(ev.dataTransfer)) {
+    const sourceId = readLinkSourceId(ev)
+    // The store refuses a link whose ends are not in the same layer, so a drag
+    // that strayed onto the grid or another layer simply does nothing.
+    if (sourceId && !props.isParent) {
+      store.addTileLink({ from: sourceId, to: props.item.id })
+    }
+    return
+  }
 
   const dragData = parseDragData(ev)
 
@@ -356,6 +383,7 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
     matching note in Item.vue. -->
     <div
       :class="`cover-frame ${isSelected ? 'active-tile' : ''}`"
+      :data-item-id="props.isParent ? undefined : props.item.id"
       :style="coverFrameStyle"
       :draggable="!isParent"
       @dragstart="handleDragStart"
