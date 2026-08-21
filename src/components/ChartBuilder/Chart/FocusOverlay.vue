@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useStore } from '../../../store'
 import LayerTile from './LayerTile.vue'
+import TileLinks from './TileLinks.vue'
 
 const store = useStore()
 
@@ -333,6 +334,10 @@ onUnmounted(() => {
       :style="tileStyle(entry.offset, index + 1)"
       @drag-state-change="isDraggingLayerTile = $event"
     />
+    <!-- Last, so the arrows paint over the tiles they cross on the way. Only
+    this layer's own links: the getter filters to ids inside it, and the query
+    is scoped to this host, so the grid's arrows never appear here. -->
+    <TileLinks :links="store.focusedLayerLinks" />
   </div>
 </template>
 

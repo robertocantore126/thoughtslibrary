@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { computed } from 'vue'
 import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
 import { resolveDroppedImage } from '../../../helpers/imageDrop'
+import { isLinkDrag, readLinkSourceId, startLinkDrag } from '../../../helpers/linkDrag'
 import { useStore } from '../../../store'
 
 const props = defineProps(['item', 'index', 'title', 'number'])
@@ -78,6 +79,14 @@ const ratingColor = computed(() => {
 
 function allowDrop(ev: DragEvent) {
   ev.preventDefault()
+
+  // A link drag is answered from `types` alone, before the payload is
+  // readable. An empty tile has no item to point at, so it refuses.
+  if (isLinkDrag(ev.dataTransfer)) {
+    ev.dataTransfer!.dropEffect = props.item ? 'link' : 'none'
+    return
+  }
+
   if (ev.dataTransfer) {
     const isInternalDrag = Array.from(ev.dataTransfer.types).includes('application/json')
     let dropEffect: DataTransfer['dropEffect'] = isInternalDrag ? 'move' : 'copy'
@@ -112,6 +121,13 @@ function handleDragStart(ev: DragEvent) {
   // The notes popup is anchored to its tile, so it would hang over a stale
   // position for the whole drag. Close it as soon as the drag begins.
   store.closeNotesPopup()
+
+  // Shift turns the drag into a link gesture: same grab, different meaning, so
+  // the move payload is never written and the tile cannot be relocated by it.
+  if (ev.shiftKey) {
+    startLinkDrag(ev, props.item.id)
+    return
+  }
 
   const dragData = JSON.stringify({
     originalIndex: props.index,
@@ -181,6 +197,14 @@ async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
 async function handleDrop(ev: DragEvent) {
   ev.preventDefault()
 
+  if (isLinkDrag(ev.dataTransfer)) {
+    const sourceId = readLinkSourceId(ev)
+    if (sourceId && props.item) {
+      store.addTileLink({ from: sourceId, to: props.item.id })
+    }
+    return
+  }
+
   let dragData: { item?: unknown, originalIndex?: number } | null = null
   try {
     dragData = JSON.parse(ev.dataTransfer?.getData('application/json') || 'null')
@@ -247,6 +271,7 @@ function deleteItem() {
     the tile. -->
     <div
       :class="`cover-frame ${isActiveTile ? 'active-tile' : ''}`"
+      :data-item-id="props.item ? props.item.id : undefined"
       :style="coverFrameStyle"
       :draggable="props.item ? 'true' : 'false'"
       @dragstart="handleDragStart"

@@ -4,6 +4,7 @@ import { computed } from 'vue'
 import { useStore } from '../../../store'
 import { BackgroundTypes, type Chart } from '../../../types'
 import Row from './Row.vue'
+import TileLinks from './TileLinks.vue'
 
 const store = useStore()
 
@@ -86,6 +87,11 @@ const visualRows = computed<VisualRow[]>(() => {
           :indices="row.indices"
         />
       </div>
+      <!-- Inside #chart so it measures against the chart's own box and moves
+      with it. Hidden during focus mode: the grid behind the overlay is dimmed
+      to 15%, and arrows painted at full strength over it would be the only
+      bright thing left on a chart the user has deliberately pushed back. -->
+      <TileLinks v-if="!isFocusMode" :links="store.gridLinks" />
     </div>
   </div>
 </template>

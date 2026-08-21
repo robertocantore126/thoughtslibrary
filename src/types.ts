@@ -15,6 +15,20 @@ export type RelatedLayer = Record<string, ChartItem>
 
 export type ChartCoordinates = Record<string, ChartItem>
 
+/**
+ * A directed arrow drawn from one tile to another, stored by ChartItem.id
+ * rather than by position — the same reason relatedLayers is keyed that way.
+ * Moving, swapping or resizing rearranges coordinates, and an id-keyed link
+ * simply re-finds both ends wherever they now are.
+ *
+ * Both ends must live in the same context: two grid tiles, or two tiles of one
+ * related layer. Nothing links the grid to a layer, or one layer to another.
+ */
+export interface TileLink {
+  from: string
+  to: string
+}
+
 export interface ChartSize {
   x: number
   y: number
@@ -42,6 +56,7 @@ export interface Chart {
   coordinates?: ChartCoordinates
   tileNotes?: Record<string, string> // legacy support for older saved charts
   relatedLayers?: Record<string, RelatedLayer> // keyed by parent ChartItem.id
+  links?: TileLink[] // arrows between tiles, by ChartItem.id
   items: Array<ChartItem | null>
   size: ChartSize
   showNumbers: boolean

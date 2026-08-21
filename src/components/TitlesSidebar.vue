@@ -36,6 +36,7 @@ const activeTileAttachment = computed({
 const activeTileCoverUrl = useResolvedImageUrl(() => activeTile.value?.item.coverURL)
 
 const hasActiveNote = computed(() => !!store.activeTileNote.trim())
+const activeTileLinks = computed(() => store.activeTileLinks)
 
 function setHasNotes(hasNotes: boolean) {
   if (!hasNotes) {
@@ -110,13 +111,30 @@ function handleUndoHotkey(event: KeyboardEvent) {
   }
 
   const activeEl = document.activeElement as HTMLElement | null
-  const isTextField = !!activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')
-  if (!isTextField) {
+
+  // The notes editor is a contenteditable div rather than an input, so it
+  // falls through every tagName test below. Its Ctrl+Z is the browser's own
+  // rich-text history, which this handler must neither prevent nor replace:
+  // preventing it left typing un-undoable, and falling through to the chart
+  // undo destroyed an unrelated arrow while the user was writing a note.
+  if (activeEl?.isContentEditable) {
     return
   }
 
+  // Inside a text field, Ctrl+Z belongs to the field's own text history;
+  // outside one it undoes the last structural change (a move or an arrow).
+  // The two stacks are separate, so an edit followed by a move undoes each
+  // in turn. preventDefault stops the browser from undoing the field's last
+  // input after the store already restored the value.
   event.preventDefault()
-  store.undoTextEdit()
+
+  const isTextField = !!activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')
+  if (isTextField) {
+    store.undoTextEdit()
+    return
+  }
+
+  store.undoChartChange()
 }
 
 onMounted(() => {
@@ -184,6 +202,28 @@ onUnmounted(() => {
             </button>
           </div>
         </div>
+      </div>
+      <div class="notes-card">
+        <span class="notes-label">Connections</span>
+        <p v-if="activeTileLinks.length === 0" class="links-empty">
+          Shift-drag from one tile to another to draw an arrow.
+        </p>
+        <ul v-else class="links-list">
+          <li v-for="link in activeTileLinks" :key="`${link.from}->${link.to}`" class="links-row">
+            <span class="links-arrow" :title="link.direction === 'out' ? 'Points to' : 'Pointed at by'">
+              {{ link.direction === 'out' ? '→' : '←' }}
+            </span>
+            <span class="links-title">{{ link.title }}</span>
+            <button
+              type="button"
+              class="links-remove"
+              title="Remove this connection"
+              @click="store.removeTileLink({ from: link.from, to: link.to })"
+            >
+              &times;
+            </button>
+          </li>
+        </ul>
       </div>
       <label class="notes-label">Rating</label>
       <div class="rating-row">
@@ -317,6 +357,59 @@ h2 {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 8px;
+}
+
+.links-empty {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+  opacity: 0.65;
+  line-height: 1.35;
+}
+
+.links-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.links-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 0.8rem;
+}
+
+.links-arrow {
+  flex: none;
+  width: 1em;
+  text-align: center;
+  opacity: 0.8;
+}
+
+.links-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.links-remove {
+  flex: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.links-remove:hover {
+  opacity: 1;
+  color: #ff7f50;
 }
 
 .notes-card .notes-label {

@@ -9,6 +9,7 @@ import {
   type Direction,
   type RelatedLayer,
   type Selection,
+  type TileLink,
 } from './types'
 
 export interface State {
@@ -23,6 +24,12 @@ export interface State {
   lastSavedAt: number | null
   textUndoStack: TextUndoEntry[]
   isApplyingTextUndo: boolean
+  // Whole-chart snapshots for Ctrl+Z on tile moves and connection arrows.
+  // Snapshot-based rather than inverse-operation, so a move that pruned
+  // dangling links is reversed by restoring the chart, not by replaying
+  // anything. Every mutation replaces `chart` wholesale, so a stored
+  // reference is already a complete immutable snapshot — no deep clone.
+  chartUndoStack: Chart[]
   // False until a real chart has been loaded into the store. The app renders
   // nothing until then, but window-level handlers registered outside that gate
   // — the Ctrl+S hotkey — still fire while `chart` is the blank default, and
@@ -211,6 +218,70 @@ function chartWithLayers(chart: Chart, layers: Record<string, RelatedLayer>): Ch
     return { ...rest }
   }
   return { ...chart, relatedLayers: layers }
+}
+
+// Same idea for `links`: an empty array is dropped rather than stored, so a
+// chart that has never used arrows serializes exactly as it did before.
+function chartWithLinks(chart: Chart, links: TileLink[]): Chart {
+  if (links.length === 0) {
+    const { links: _links, ...rest } = chart
+    return { ...rest }
+  }
+  return { ...chart, links }
+}
+
+export function findItemById(chart: Chart, id: string): ChartItem | null {
+  for (const item of Object.values(chart.coordinates || {})) {
+    if (item.id === id) {
+      return item
+    }
+  }
+  for (const layer of Object.values(chart.relatedLayers || {})) {
+    for (const item of Object.values(layer)) {
+      if (item.id === id) {
+        return item
+      }
+    }
+  }
+  return null
+}
+
+// Which context a tile belongs to: the grid, or one specific related layer.
+// A link is only legal between two ids that answer the same thing here.
+function linkContextOf(chart: Chart, id: string): string | null {
+  if (findItemCoord(chart.coordinates || {}, id)) {
+    return 'grid'
+  }
+
+  for (const [parentId, layer] of Object.entries(chart.relatedLayers || {})) {
+    for (const item of Object.values(layer)) {
+      if (item.id === id) {
+        return `layer:${parentId}`
+      }
+    }
+  }
+
+  return null
+}
+
+// Drops links whose ends no longer exist. Re-checking the whole list after a
+// structural change is what makes this safe: deleting a tile, overwriting one,
+// or removing a parent (which takes its entire layer with it) all funnel
+// through here, so no removal path can leave an arrow pointing at nothing.
+function pruneDanglingLinks(chart: Chart): Chart {
+  const links = chart.links
+  if (!links || links.length === 0) {
+    return chart
+  }
+
+  const live = new Set<string>()
+  Object.values(chart.coordinates || {}).forEach(item => live.add(item.id))
+  Object.values(chart.relatedLayers || {}).forEach((layer) => {
+    Object.values(layer).forEach(item => live.add(item.id))
+  })
+
+  const kept = links.filter(link => live.has(link.from) && live.has(link.to))
+  return kept.length === links.length ? chart : chartWithLinks(chart, kept)
 }
 
 // Smallest dimension at which every layer tile still fits, per axis.
@@ -436,6 +507,7 @@ export const initialState = {
   lastSavedAt: null,
   textUndoStack: [],
   isApplyingTextUndo: false,
+  chartUndoStack: [],
   chartLoaded: false,
 } as State
 
@@ -562,6 +634,35 @@ export const useStore = defineStore('store', {
       this.selection = selection
       this.isApplyingTextUndo = false
     },
+    // Pushes the current chart onto the structural undo stack. Only called
+    // from the move/link actions after their guards, so a refused operation
+    // never burns an undo press on a no-op. The cap mirrors textUndoStack.
+    recordChartChange() {
+      this.chartUndoStack.push(this.chart)
+
+      if (this.chartUndoStack.length > 300) {
+        this.chartUndoStack = this.chartUndoStack.slice(this.chartUndoStack.length - 300)
+      }
+    },
+    // Restores the chart from the most recent snapshot. A position-keyed
+    // restore would land on whatever tile now occupies the recorded cell, so
+    // the whole chart is swapped in instead — a tile moved since the snapshot
+    // comes back in its original place along with everything else. Selection
+    // is only cleared when it points at a cell the restored chart no longer
+    // fills; an item that simply moved is reselected at its old home.
+    undoChartChange() {
+      const previous = this.chartUndoStack.pop()
+      if (!previous) {
+        return
+      }
+
+      this.chart = previous
+
+      if (this.selection && !resolveItemAt(this.chart, this.selection)) {
+        this.selection = null
+        this.notesPopupKey = null
+      }
+    },
     syncItemsFromCoordinates() {
       this.chart = {
         ...this.chart,
@@ -602,11 +703,51 @@ export const useStore = defineStore('store', {
         this.notesPopupKey = null
       }
 
-      this.chart = {
+      this.chart = pruneDanglingLinks({
         ...this.chart,
         coordinates: coords,
         items: itemsFromCoordinates(coords, this.chart.size),
+      })
+    },
+    // Draws an arrow from one tile to another. Both ends must sit in the same
+    // context — two grid tiles, or two tiles of one related layer — so an
+    // arrow can never span the grid and a layer, where the two are never on
+    // screen in the same geometry and no line could be drawn between them.
+    addTileLink(p: { from: string, to: string }) {
+      if (p.from === p.to) {
+        return
       }
+
+      const fromContext = linkContextOf(this.chart, p.from)
+      if (!fromContext || fromContext !== linkContextOf(this.chart, p.to)) {
+        return
+      }
+
+      const links = this.chart.links || []
+      // A second arrow the same way round is the same arrow. The reverse
+      // direction is a different statement, so B->A alongside A->B is kept.
+      if (links.some(link => link.from === p.from && link.to === p.to)) {
+        return
+      }
+
+      this.recordChartChange()
+
+      this.chart = chartWithLinks(this.chart, [...links, { from: p.from, to: p.to }])
+    },
+    removeTileLink(p: { from: string, to: string }) {
+      const links = this.chart.links
+      if (!links) {
+        return
+      }
+
+      const kept = links.filter(link => !(link.from === p.from && link.to === p.to))
+      if (kept.length === links.length) {
+        return
+      }
+
+      this.recordChartChange()
+
+      this.chart = chartWithLinks(this.chart, kept)
     },
     // For changing the place of a current item
     moveItem(payload: { oldIndex: number, newIndex: number }) {
@@ -634,6 +775,12 @@ export const useStore = defineStore('store', {
       }
 
       coords[newKey] = movingItem
+
+      // A drop onto the tile's own cell passes every guard above but changes
+      // nothing, so it must not spend an undo press.
+      if (payload.oldIndex !== payload.newIndex) {
+        this.recordChartChange()
+      }
 
       this.chart = {
         ...this.chart,
@@ -946,6 +1093,7 @@ export const useStore = defineStore('store', {
       this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
+      this.chartUndoStack = []
       this.chartLoaded = true
     },
     reset() {
@@ -956,6 +1104,7 @@ export const useStore = defineStore('store', {
       this.resizeBlockMessage = null
       this.textUndoStack = []
       this.isApplyingTextUndo = false
+      this.chartUndoStack = []
       this.chartLoaded = true
     },
     toggleCollapse() {
@@ -1040,7 +1189,7 @@ export const useStore = defineStore('store', {
         }
       }
 
-      this.chart = chartWithLayers(this.chart, layers)
+      this.chart = pruneDanglingLinks(chartWithLayers(this.chart, layers))
     },
     moveLayerTile(p: { parentId: string, fromOffset: string, toOffset: string }) {
       const parentCoord = findItemCoord(this.chart.coordinates || {}, p.parentId)
@@ -1070,6 +1219,13 @@ export const useStore = defineStore('store', {
       }
 
       layers[p.parentId] = layer
+
+      // Both drop paths already refuse a drop onto the tile's own cell; the
+      // guard is defensive so a no-op move never consumes an undo press.
+      if (p.fromOffset !== p.toOffset) {
+        this.recordChartChange()
+      }
+
       this.chart = chartWithLayers(this.chart, layers)
 
       if (this.selection?.kind === 'layer' && this.selection.parentId === p.parentId) {
@@ -1216,6 +1372,52 @@ export const useStore = defineStore('store', {
       }
 
       return active.item.attachmentURL || ''
+    },
+    // Arrows whose ends are both grid tiles. The overlay draws these against
+    // the chart; a layer's own arrows are drawn by the focus overlay instead,
+    // in its own geometry.
+    gridLinks(state): TileLink[] {
+      const links = state.chart.links
+      if (!links || links.length === 0) {
+        return []
+      }
+
+      const gridIds = new Set(Object.values(state.chart.coordinates || {}).map(item => item.id))
+      return links.filter(link => gridIds.has(link.from) && gridIds.has(link.to))
+    },
+    focusedLayerLinks(state): TileLink[] {
+      const links = state.chart.links
+      const layer = state.focusedTileId ? state.chart.relatedLayers?.[state.focusedTileId] : null
+      if (!links || links.length === 0 || !layer) {
+        return []
+      }
+
+      const layerIds = new Set(Object.values(layer).map(item => item.id))
+      return links.filter(link => layerIds.has(link.from) && layerIds.has(link.to))
+    },
+    // Every arrow touching the selected tile, labelled by the tile at the far
+    // end, for the sidebar's connection list.
+    activeTileLinks(_state): Array<{ direction: 'out' | 'in', title: string, from: string, to: string }> {
+      const active = this.activeTile
+      if (!active) {
+        return []
+      }
+
+      const id = active.item.id
+      const chart = this.chart
+
+      return (chart.links || [])
+        .filter(link => link.from === id || link.to === id)
+        .map((link) => {
+          const isOutgoing = link.from === id
+          const other = findItemById(chart, isOutgoing ? link.to : link.from)
+          return {
+            direction: isOutgoing ? 'out' as const : 'in' as const,
+            title: other ? buildTitle(other) : 'Unknown tile',
+            from: link.from,
+            to: link.to,
+          }
+        })
     },
     focusedLayer(state): RelatedLayer | null {
       if (!state.focusedTileId) {
