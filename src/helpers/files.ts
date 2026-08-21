@@ -67,6 +67,13 @@ export async function optimizeImageBlob(file: Blob): Promise<Blob> {
     return file
   }
 
+  // A canvas only ever holds one frame, so re-encoding an animated GIF would
+  // silently throw the animation away and keep the first frame. Stored as-is
+  // instead; IndexedDB has the room for it.
+  if (type === 'image/gif') {
+    return file
+  }
+
   try {
     const img = await loadImageFromBlob(file)
     const canvas = document.createElement('canvas')

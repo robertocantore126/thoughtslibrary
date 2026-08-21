@@ -5,7 +5,7 @@ import { BIconX } from 'bootstrap-icons-vue'
 import { v4 as uuidv4 } from 'uuid'
 import { computed } from 'vue'
 import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
-import { storeLocalImage } from '../../../helpers/assets'
+import { resolveDroppedImage } from '../../../helpers/imageDrop'
 import { useStore } from '../../../store'
 
 const props = defineProps(['item', 'index', 'title', 'number'])
@@ -13,7 +13,6 @@ const props = defineProps(['item', 'index', 'title', 'number'])
 const store = useStore()
 const BASE_ITEM_SIZE_PX = 130
 let dragImageContainer: HTMLElement | null = null
-const SUPPORTED_IMAGE_EXTENSIONS = /\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$/i
 
 const imgStyle: ComputedRef<CSSProperties> = computed(() => ({
   borderRadius: store.chart.roundCorners ? '10px' : '',
@@ -149,38 +148,6 @@ function handleDragEnd() {
   dragImageContainer = null
 }
 
-function getFileExtension(name: string): string {
-  const parts = name.split('.')
-  return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : ''
-}
-
-function isSupportedImageFile(file: File): boolean {
-  const validMime = ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)
-  const validExtension = ['jpg', 'jpeg', 'png', 'webp'].includes(getFileExtension(file.name))
-  return validMime || validExtension
-}
-
-function extractTitleFromPath(pathOrName: string): string {
-  const lastSegment = pathOrName.split('/').pop() || ''
-  const decoded = decodeURIComponent(lastSegment)
-  const withoutExt = decoded.replace(/\.[^.]+$/, '')
-  return withoutExt || 'Dropped image'
-}
-
-function isSupportedImageUrl(rawUrl: string): boolean {
-  try {
-    const url = new URL(rawUrl)
-    if (!['http:', 'https:'].includes(url.protocol)) {
-      return false
-    }
-
-    return SUPPORTED_IMAGE_EXTENSIONS.test(url.pathname + url.search + url.hash)
-  }
-  catch {
-    return false
-  }
-}
-
 function addDroppedImageToTile(coverURL: string, title: string) {
   store.addItem({
     item: {
@@ -201,62 +168,14 @@ function isChartItem(value: unknown): value is ChartItem {
   return typeof candidate.title === 'string' && typeof candidate.coverURL === 'string'
 }
 
-function getDroppedImageUrlFromDataTransfer(dataTransfer: DataTransfer): string | null {
-  const uriList = dataTransfer.getData('text/uri-list')
-  if (uriList) {
-    const candidate = uriList
-      .split('\n')
-      .map(line => line.trim())
-      .find(line => line && !line.startsWith('#') && isSupportedImageUrl(line))
-
-    if (candidate) {
-      return candidate
-    }
-  }
-
-  const html = dataTransfer.getData('text/html')
-  if (html) {
-    const doc = new DOMParser().parseFromString(html, 'text/html')
-    const image = doc.querySelector('img')
-    const src = image?.getAttribute('src')
-    if (src && isSupportedImageUrl(src)) {
-      return src
-    }
-  }
-
-  const plainText = dataTransfer.getData('text/plain')
-  if (plainText && isSupportedImageUrl(plainText.trim())) {
-    return plainText.trim()
-  }
-
-  return null
-}
-
 async function tryHandleExternalImageDrop(ev: DragEvent): Promise<boolean> {
-  const dataTransfer = ev.dataTransfer
-  if (!dataTransfer) {
+  const dropped = await resolveDroppedImage(ev)
+  if (!dropped) {
     return false
   }
 
-  const firstSupportedFile = Array.from(dataTransfer.files).find(file => isSupportedImageFile(file))
-  if (firstSupportedFile) {
-    try {
-      const storedUrl = await storeLocalImage(firstSupportedFile)
-      addDroppedImageToTile(storedUrl, extractTitleFromPath(firstSupportedFile.name))
-      return true
-    }
-    catch (e) {
-      console.error(e)
-    }
-  }
-
-  const droppedImageUrl = getDroppedImageUrlFromDataTransfer(dataTransfer)
-  if (droppedImageUrl) {
-    addDroppedImageToTile(droppedImageUrl, extractTitleFromPath(new URL(droppedImageUrl).pathname))
-    return true
-  }
-
-  return false
+  addDroppedImageToTile(dropped.coverURL, dropped.title)
+  return true
 }
 
 async function handleDrop(ev: DragEvent) {
