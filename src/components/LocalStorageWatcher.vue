@@ -3,6 +3,7 @@ import type { Chart } from '../types'
 import { onMounted, ref } from 'vue'
 import { collectChartAssetIds, collectUnusedAssets, persistChartAssets } from '../helpers/assets'
 import { initializeFirstRun } from '../helpers/chart'
+import { adoptChartCovers, collectAdoptableAssets } from '../helpers/coverAdoption'
 import {
   appendChart,
   findByUuid,
@@ -137,7 +138,58 @@ onMounted(async () => {
     initializeFirstRun()
     store.setEntireChart(getActiveChart().data)
   }
+
+  scheduleCoverAdoption()
 })
+
+// Copies remote covers into the local asset store in the background, so a
+// chart stops depending on the servers it imported them from. Started only
+// after the gate above, and never awaited: an unadopted cover still displays
+// from its remote URL, so nothing the user sees waits on this.
+let adoptionRunning = false
+let adoptionTimer: ReturnType<typeof setTimeout> | null = null
+let adoptionChartUuid: string | null = null
+
+async function runCoverAdoption() {
+  if (adoptionRunning) {
+    return
+  }
+
+  const assets = collectAdoptableAssets(store.chart)
+  if (assets.length === 0) {
+    return
+  }
+
+  adoptionRunning = true
+  adoptionChartUuid = getActiveChartUuid()
+
+  try {
+    await adoptChartCovers(
+      assets,
+      (asset, localUrl) => store.replaceItemAsset({ itemId: asset.itemId, field: asset.field, url: localUrl }),
+      // Abandon the run the moment the user switches charts, rather than
+      // writing covers resolved for one chart into whichever is open now.
+      () => getActiveChartUuid() !== adoptionChartUuid,
+    )
+  }
+  catch (error) {
+    console.error('Could not copy remote covers locally:', error)
+  }
+  finally {
+    adoptionRunning = false
+  }
+}
+
+// Debounced, because every adopted cover is itself a store mutation. Waiting
+// for the chart to settle keeps a finished run from immediately re-triggering
+// itself, and picks up covers from a newly added item or a fresh import in the
+// same pass.
+function scheduleCoverAdoption() {
+  if (adoptionTimer) {
+    clearTimeout(adoptionTimer)
+  }
+  adoptionTimer = setTimeout(runCoverAdoption, 2000)
+}
 
 // Persist the whole chart, but only after the edit burst settles — a note
 // keystroke otherwise stringifies the chart on every character. Flush any
@@ -161,6 +213,9 @@ store.$subscribe((_mutation, state) => {
   }
 
   saveTimer = setTimeout(flushPendingChartWrite, 300)
+  // Newly imported items arrive through here too, so their covers get adopted
+  // in the same pass rather than waiting for the next launch.
+  scheduleCoverAdoption()
   // flush: 'sync' so every mutation is observed as it happens. Pinia's default
   // ('pre') batches to the render cycle, which collapses "edit chart A" and
   // "switch to chart B" into a single notification carrying only B's state -

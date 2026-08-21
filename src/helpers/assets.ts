@@ -223,6 +223,49 @@ export async function inlineStoredImageUrl(url?: string | null): Promise<string>
   return await readBlobAsDataUrl(blob)
 }
 
+export function isRemoteHttpUrl(url?: string | null): boolean {
+  return typeof url === 'string' && /^https?:\/\//i.test(url)
+}
+
+/**
+ * Copies a remote cover into the asset store and returns its `local-asset://`
+ * URL, or null if it could not be fetched.
+ *
+ * Imported covers are stored as plain remote URLs, which makes every chart a
+ * permanent dependency on someone else's server. covers.openlibrary.org rate
+ * limits per IP, so a chart with many covers loads them all at once, some come
+ * back rejected, and those tiles render as a broken image until the page is
+ * reloaded. Adopting the bytes once removes the dependency entirely — and with
+ * it the link rot when a URL is eventually retired.
+ *
+ * A failure here is not an error: the caller keeps the remote URL and the tile
+ * carries on working exactly as before. Not every image host allows a
+ * cross-origin read, and no chart should be worse off for one that doesn't.
+ */
+export async function adoptRemoteImage(url: string): Promise<string | null> {
+  if (!hasIndexedDb() || !isRemoteHttpUrl(url)) {
+    return null
+  }
+
+  try {
+    const response = await fetch(url)
+    if (!response.ok) {
+      return null
+    }
+
+    const blob = await response.blob()
+    if (!blob.size || !blob.type.startsWith('image/')) {
+      return null
+    }
+
+    return await storeLocalImage(blob)
+  }
+  catch {
+    // A blocked cross-origin read, an offline machine, or a rate-limited host.
+    return null
+  }
+}
+
 export async function persistImageUrl(url?: string | null): Promise<string> {
   if (!url) {
     return ''
