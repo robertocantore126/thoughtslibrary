@@ -19,6 +19,10 @@ export interface StoredFileHandle {
     write: (data: string) => Promise<void>
     close: () => Promise<void>
   }>
+  // Reading the file back is what lets a write-through check that the file still
+  // holds the chart it is about to overwrite, the same way the desktop path
+  // does through `readChartFile`.
+  getFile?: () => Promise<Blob>
   name: string
 }
 

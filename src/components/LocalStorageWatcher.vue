@@ -15,10 +15,15 @@ import {
   setStoredCharts,
   updateStoredChart,
 } from '../helpers/localStorage'
+import { detectOtherWindows, reportPersistFailure, reportPersistSuccess } from '../helpers/persistStatus'
 import { useStore } from '../store'
 
 const store = useStore()
 let hasWarnedStorageQuota = false
+// Set when the startup pass could not finish. The gate still opens - the app
+// with an unreadable chart is worth more than a blank page - but the failure is
+// shown rather than swallowed.
+const loadError = ref<string | null>(null)
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 // The startup load runs an async chain (asset persistence, the unused-blob
 // sweep). The app itself is not rendered until it finishes: before the store
@@ -65,7 +70,19 @@ function persistChart(uuid: string, chart: Chart) {
     if (storedChart) {
       updateStoredChart({ ...storedChart, data: chart }, uuid)
     }
+    else if (uuid) {
+      // The chart this write belongs to no longer has an entry, which means it
+      // was deleted while the write was still pending. Creating it again would
+      // resurrect the deleted chart under a fresh uuid AND make it active, so
+      // the next mutation wrote the chart the user had switched to into the
+      // resurrection - two entries, both holding the wrong data, and the
+      // deleted chart back in the switcher. A write with nowhere to go is
+      // dropped: the user deleted it.
+      return
+    }
     else {
+      // No active chart at all. This is the bootstrap case and the only one
+      // that may create an entry.
       const newUuid = appendChart({
         timestamp: new Date().getTime(),
         data: chart,
@@ -73,9 +90,17 @@ function persistChart(uuid: string, chart: Chart) {
 
       setActiveChart(newUuid)
     }
+
+    // A write got through, so whatever was wrong before is not wrong now. The
+    // quota warning re-arms with it: a failure that alerts only once, ever,
+    // leaves the user editing an app that silently stopped saving.
+    hasWarnedStorageQuota = false
+    reportPersistSuccess()
   }
   catch (error) {
     if (isStorageQuotaExceeded(error)) {
+      reportPersistFailure('Out of local storage space - your changes are NOT being saved. Save the chart to a file, then remove some local images.')
+
       if (!hasWarnedStorageQuota) {
         hasWarnedStorageQuota = true
         // eslint-disable-next-line no-alert
@@ -84,20 +109,36 @@ function persistChart(uuid: string, chart: Chart) {
       return
     }
 
+    reportPersistFailure('Your changes are NOT being saved. Save the chart to a file to avoid losing them.')
     console.error(error)
   }
 }
 
-onMounted(async () => {
+// Everything the startup pass does before the app is allowed to render. Every
+// step of it is individually recoverable: the caller opens the gate whatever
+// happens here, because a throw on this path used to leave `loaded` false
+// forever - a blank page, on every launch, with every chart still in storage
+// and no way to reach it.
+async function loadStoredCharts() {
   localStorageMigrations()
 
   const storedCharts = getStoredCharts()
   const normalizedEntries = await Promise.all(
     Object.entries(storedCharts).map(async ([uuid, chart]) => {
-      return [uuid, {
-        ...chart,
-        data: await persistChartAssets(chart.data),
-      }] as const
+      // Per entry, so one unreadable chart cannot stop every other chart from
+      // being normalized. The bad entry is passed through exactly as stored
+      // rather than dropped or repaired - it is the user's data, and the point
+      // of surviving this is to leave it recoverable.
+      try {
+        return [uuid, {
+          ...chart,
+          data: await persistChartAssets(chart.data),
+        }] as const
+      }
+      catch (error) {
+        console.error(`Could not normalize chart ${uuid}:`, error)
+        return [uuid, chart] as const
+      }
     }),
   )
 
@@ -113,30 +154,68 @@ onMounted(async () => {
   // Reclaim image blobs no chart points at any more. Deleting a tile or a
   // chart only ever dropped the reference, so without this sweep the blobs
   // stayed in IndexedDB forever and storage could only ever grow.
+  //
+  // The root set is only the charts THIS window can see. Another window has
+  // charts of its own in flight, and blobs it has just written whose chart
+  // write has not landed yet, so from here they are indistinguishable from
+  // orphans - and deleting one destroys an image with no copy anywhere. When
+  // anyone else is open, the sweep waits for a launch that is alone.
   try {
-    const referenced = new Set<string>()
-    for (const [, chart] of normalizedEntries) {
-      collectChartAssetIds(chart.data, referenced)
+    if (await detectOtherWindows()) {
+      console.warn('Another window is open; skipping the unused-image sweep.')
     }
-    await collectUnusedAssets(referenced)
+    else {
+      const referenced = new Set<string>()
+      for (const [, chart] of normalizedEntries) {
+        collectChartAssetIds(chart.data, referenced)
+      }
+      // An entry that could not be read contributes no references, and a sweep
+      // that cannot see a chart's references would delete its images. Better to
+      // reclaim nothing this run than to collect against an incomplete root set.
+      if (normalizedEntries.some(([, chart]) => !chart?.data)) {
+        throw new Error('A chart could not be read; skipping the sweep rather than collecting against an incomplete root set')
+      }
+      await collectUnusedAssets(referenced)
+    }
   }
   catch (error) {
     console.error('Could not reclaim unused images:', error)
+  }
+}
+
+onMounted(async () => {
+  try {
+    await loadStoredCharts()
+  }
+  catch (error) {
+    console.error('Could not load stored charts:', error)
+    loadError.value = 'Some of your saved data could not be read. Save a copy to a file before making changes.'
   }
 
   // Flip the gate before setEntireChart so the app mounts holding the real
   // chart, never a blank one. The store mutation below happens after this
   // flag is set, so the subscribe handler treats it as a normal edit.
+  //
+  // This must happen no matter what went wrong above. The chart the user is
+  // looking for is almost always still readable even when the pass that
+  // normalizes it is not.
   loaded.value = true
 
-  const activeChart = getActiveChart()
+  try {
+    const activeChart = getActiveChart()
 
-  if (activeChart) {
-    store.setEntireChart(activeChart.data)
+    if (activeChart?.data) {
+      store.setEntireChart(activeChart.data)
+    }
+    else {
+      initializeFirstRun()
+      store.setEntireChart(getActiveChart().data)
+    }
   }
-  else {
-    initializeFirstRun()
-    store.setEntireChart(getActiveChart().data)
+  catch (error) {
+    console.error('Could not open the active chart:', error)
+    loadError.value = 'The last chart you had open could not be read. It is still in storage; do not delete it.'
+    store.reset()
   }
 
   scheduleCoverAdoption()
@@ -227,5 +306,23 @@ window.addEventListener('beforeunload', flushPendingChartWrite)
 </script>
 
 <template>
+  <div v-if="loadError" class="load-error" role="alert">
+    {{ loadError }}
+  </div>
   <slot v-if="loaded" />
 </template>
+
+<style scoped>
+.load-error {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  padding: 8px 16px;
+  background: #7a1f1f;
+  color: #ffffff;
+  font-size: 13px;
+  text-align: center;
+}
+</style>

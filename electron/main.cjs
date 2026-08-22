@@ -6,6 +6,7 @@ const path = require('node:path')
 const process = require('node:process')
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron')
 const serveHandler = require('serve-handler')
+const { writeFileAtomicSync } = require('./writeFileAtomic.cjs')
 
 // How long the print window may wait for fonts and remote cover images before
 // it prints without them. Covers that are still remote URLs are fetched here,
@@ -123,7 +124,7 @@ ipcMain.handle('save-chart-file', async (_event, payload) => {
     const writeThrough = payload.mode === 'save' && typeof payload.filePath === 'string' && payload.filePath.length > 0
 
     if (writeThrough) {
-      fs.writeFileSync(payload.filePath, payload.content, 'utf8')
+      writeFileAtomicSync(payload.filePath, payload.content, 'utf8')
       return { success: true, filePath: payload.filePath }
     }
 
@@ -136,7 +137,7 @@ ipcMain.handle('save-chart-file', async (_event, payload) => {
       return { success: false, canceled: true }
     }
 
-    fs.writeFileSync(filePath, payload.content, 'utf8')
+    writeFileAtomicSync(filePath, payload.content, 'utf8')
     return { success: true, filePath }
   }
   catch (error) {
@@ -155,9 +156,12 @@ ipcMain.handle('read-chart-file', async (_event, filePath) => {
     return { success: true, content }
   }
   catch (error) {
-    // A missing file is not a conflict: there is nothing to overwrite yet.
+    // A missing file is reported as such rather than as an error. It is not a
+    // conflict, but it is not "nothing to protect" either: a remembered path
+    // that has stopped existing means the file was moved or renamed, and the
+    // renderer falls back to the dialog instead of silently recreating it.
     if (error && typeof error === 'object' && error.code === 'ENOENT') {
-      return { success: true, content: null }
+      return { success: true, content: null, missing: true }
     }
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
   }
@@ -298,7 +302,7 @@ ipcMain.handle('print-chart-to-pdf', async (event, payload) => {
       return { success: false, canceled: true, tracePath, pdf }
     }
 
-    fs.writeFileSync(filePath, pdfBuffer)
+    writeFileAtomicSync(filePath, pdfBuffer)
     const tracePath = trace.write('ok', { pdf, savedTo: filePath })
     return { success: true, filePath, tracePath, pdf }
   }
