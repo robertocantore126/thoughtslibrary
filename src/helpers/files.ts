@@ -1,8 +1,30 @@
-const MAX_IMAGE_DIMENSION = 512
 const MIN_IMAGE_DIMENSION = 160
 const INITIAL_WEBP_QUALITY = 0.78
 const MIN_WEBP_QUALITY = 0.42
-const MAX_OUTPUT_BYTES = 180 * 1024
+
+export interface ImageBudget {
+  /** Longest side the image is allowed to keep, in pixels. */
+  maxDimension: number
+  /** Size the re-encoding aims to come in under. */
+  maxBytes: number
+}
+
+// Stored blobs live in IndexedDB, whose quota is measured in gigabytes. The
+// original budget - 512px and 180KB - was sized for localStorage, which has not
+// held image bytes since the asset store was introduced, and it was throwing
+// away most of every picture the user imported for room that was never needed.
+export const STORED_ASSET_BUDGET: ImageBudget = {
+  maxDimension: 2048,
+  maxBytes: 2 * 1024 * 1024,
+}
+
+// The fallback for a browser with no IndexedDB, where the image ends up as a
+// data URL inside localStorage's ~5MB origin budget. Here the old numbers are
+// exactly right, and generous ones would blow the quota on a handful of covers.
+export const INLINE_ASSET_BUDGET: ImageBudget = {
+  maxDimension: 512,
+  maxBytes: 180 * 1024,
+}
 
 export function readBlobAsDataUrl(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -57,7 +79,7 @@ function canvasToBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob>
   })
 }
 
-export async function optimizeImageBlob(file: Blob): Promise<Blob> {
+export async function optimizeImageBlob(file: Blob, budget: ImageBudget = STORED_ASSET_BUDGET): Promise<Blob> {
   if (typeof document === 'undefined') {
     return file
   }
@@ -73,6 +95,15 @@ export async function optimizeImageBlob(file: Blob): Promise<Blob> {
   if (type === 'image/gif') {
     return file
   }
+
+  // An SVG is resolution-independent, and drawing one to a canvas replaces it
+  // with a bitmap of whatever size happened to be picked - a permanent, and
+  // pointless, downgrade of a cover that was already as small as it will get.
+  if (type === 'image/svg+xml') {
+    return file
+  }
+
+  const { maxDimension: MAX_IMAGE_DIMENSION, maxBytes: MAX_OUTPUT_BYTES } = budget
 
   try {
     const img = await loadImageFromBlob(file)
@@ -130,7 +161,9 @@ export async function optimizeImageBlob(file: Blob): Promise<Blob> {
   }
 }
 
+// The result is a data URL, so it is bound by whatever holds it rather than by
+// the asset store's room.
 export async function fileToDataUrl(file: Blob): Promise<string> {
-  const optimized = await optimizeImageBlob(file)
+  const optimized = await optimizeImageBlob(file, INLINE_ASSET_BUDGET)
   return readBlobAsDataUrl(optimized)
 }

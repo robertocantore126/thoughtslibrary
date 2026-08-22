@@ -1,14 +1,20 @@
 <script setup lang='ts'>
-import type { Ref } from 'vue'
+import type { Ref, ShallowRef } from 'vue'
 import type { StoredCharts } from '../../types'
-import { ref, watch } from 'vue'
-import { getActiveChartUuid, getStoredCharts, getUuids, setActiveChart } from '../../helpers/localStorage'
+import { ref, shallowRef, watch } from 'vue'
+import { getActiveChartUuid, getStoredChartsSnapshot, getUuids, setActiveChart } from '../../helpers/localStorage'
 import { useStore } from '../../store'
 
 const store = useStore()
 
 const activeChartUuid: Ref<string> = ref(getActiveChartUuid())
-const charts: Ref<StoredCharts> = ref(getStoredCharts())
+// The store replaces `chart` wholesale on every mutation, so the watcher below
+// runs on every keystroke. It used to re-parse the entire chart store twice per
+// run - megabytes of JSON per typed character once the user owns a few large
+// charts. The snapshot re-parses only when the stored string has actually
+// changed, and `shallowRef` keeps Vue from deep-proxying every chart on top of
+// that. Read-only here: the snapshot is shared, and nothing in this file writes.
+const charts: ShallowRef<Readonly<StoredCharts>> = shallowRef(getStoredChartsSnapshot())
 const chartUuids: Ref<string[]> = ref(getUuids())
 
 watch(() => store.chart, () => {
@@ -16,12 +22,12 @@ watch(() => store.chart, () => {
 })
 
 function sortUuids(uuidArr: string[]) {
-  return uuidArr.toSorted((a, b) => charts.value[b].timestamp - charts.value[a].timestamp)
+  return uuidArr.toSorted((a, b) => (charts.value[b]?.timestamp || 0) - (charts.value[a]?.timestamp || 0))
 }
 
 function updateChartList() {
   activeChartUuid.value = getActiveChartUuid()
-  charts.value = getStoredCharts()
+  charts.value = getStoredChartsSnapshot()
   chartUuids.value = sortUuids(getUuids())
 }
 

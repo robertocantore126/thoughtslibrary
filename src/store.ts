@@ -663,6 +663,23 @@ export const useStore = defineStore('store', {
         this.notesPopupKey = null
       }
     },
+    // Swaps one item's cover or attachment for a copy now held in the local
+    // asset store. Resolved by item id, not position: adoption runs in the
+    // background over several seconds, and a tile the user drags meanwhile
+    // would otherwise have its new cover written onto whatever now sits in the
+    // cell it started in. Deliberately not undoable — the picture is identical,
+    // only its source changed, so it is not a change the user made.
+    replaceItemAsset(p: { itemId: string, field: 'coverURL' | 'attachmentURL', url: string }) {
+      const selection = findSelectionForItem(this.chart, p.itemId)
+      if (!selection) {
+        return
+      }
+
+      this.chart = applyItemUpdate(this.chart, selection, current => ({
+        ...current,
+        [p.field]: p.url,
+      }))
+    },
     syncItemsFromCoordinates() {
       this.chart = {
         ...this.chart,

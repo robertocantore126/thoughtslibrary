@@ -6,6 +6,7 @@ import { BIconArrowRepeat, BIconFileEarmarkArrowDown } from 'bootstrap-icons-vue
 import { onUnmounted, ref, watch } from 'vue'
 import { downloadChart, initializeFirstRun } from '../../helpers/chart'
 import { appendChart, destroyChart, getActiveChartUuid, getNewestChartUuid, getStoredCharts, setActiveChart } from '../../helpers/localStorage'
+import { multipleWindowsOpen, persistError } from '../../helpers/persistStatus'
 import { createEmptyChart, useStore } from '../../store'
 import Switcher from './Switcher.vue'
 
@@ -79,14 +80,16 @@ function deleteChart() {
 
     const newStoredCharts = getStoredCharts()
 
-    if (Object.keys(newStoredCharts).length < 1) {
+    // If there are other charts, pick the most recently created one.
+    const newestUuid = Object.keys(newStoredCharts).length > 0 ? getNewestChartUuid() : null
+
+    if (!newestUuid) {
       // We've just deleted the only saved chart, so let's re-initialize.
       initializeFirstRun()
       store.reset()
     }
     else {
-      // If there are other charts, pick the most recently created one.
-      const chart = setActiveChart(getNewestChartUuid())
+      const chart = setActiveChart(newestUuid)
 
       store.setEntireChart(chart.data)
     }
@@ -111,6 +114,19 @@ function deleteChart() {
       <Transition name="saved-fade">
         <span v-if="showSaved" class="saved-indicator" role="status">Saved</span>
       </Transition>
+      <!-- Unlike the "Saved" toast these stay put. A save that has stopped
+           working has to keep saying so for as long as it is true. -->
+      <span v-if="persistError" class="persist-error" role="alert" :title="persistError">
+        Not saving
+      </span>
+      <span
+        v-else-if="multipleWindowsOpen"
+        class="persist-warning"
+        role="status"
+        title="Another window of this app is open. Both windows save the whole chart list, so whichever saves last wins and the other window's edits are lost. Close one."
+      >
+        2nd window open
+      </span>
     </div>
     <button
       v-if="!loading"
@@ -186,6 +202,24 @@ function deleteChart() {
   color: #7ee08a;
   white-space: nowrap;
   user-select: none;
+}
+
+.persist-error,
+.persist-warning {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  cursor: help;
+}
+
+.persist-error {
+  color: #ff6b6b;
+}
+
+.persist-warning {
+  color: #ffc861;
 }
 
 .saved-fade-enter-active,

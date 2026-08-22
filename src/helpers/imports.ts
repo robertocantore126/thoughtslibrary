@@ -9,7 +9,7 @@ import { collectChartExportAssets, inlineStoredChartAssets, persistChartAssets }
 import { forceRefresh } from './chart'
 import { type ExportTrace, startExportTrace, summariseChart } from './exportTrace'
 import { ensureWritePermission, getRememberedFileHandle, rememberFileHandle, type StoredFileHandle } from './fileHandles'
-import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getNewestChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
+import { appendChart, findByUuid, getActiveChart, getActiveChartUuid, getRememberedChartFilePath, migrateChart, rememberChartFilePath, setActiveChart, updateStoredChart } from './localStorage'
 import { renderMarkdown } from './markdown'
 import { renderFrameToPdf } from './pdfFromDom'
 import { buildPrintDocument, paperSizePx } from './printDocument'
@@ -43,6 +43,7 @@ function getWindowApi() {
       readChartFile?: (filePath: string) => Promise<{
         success: boolean
         content?: string | null
+        missing?: boolean
         error?: string
       }>
       getPathForFile?: (file: File) => string
@@ -428,33 +429,89 @@ async function getStoredChartUuid(content: string): Promise<string | null> {
   }
 }
 
-// A plain "save" writes straight through the chart's remembered path without
-// any dialog. Before doing that, verify the file on disk still belongs to this
-// chart: if it now contains a different chart, or content that isn't a chart
-// backup, refuse to overwrite so a same-named file is never silently clobbered.
-async function assertNoSaveConflict(uuid: string, filePath: string): Promise<void> {
+/**
+ * A plain "save" writes straight through the chart's remembered path without any
+ * dialog. Before doing that, verify the file on disk still belongs to this
+ * chart: if it now contains a different chart, or content that isn't a chart
+ * backup, refuse to overwrite so a same-named file is never silently clobbered.
+ *
+ * Returns whether the remembered path may still be written through. False means
+ * the file is no longer there - moved or renamed out from under the app - and
+ * the caller must fall back to the dialog. Writing through in that case created
+ * a brand new file at the old location and reported a successful save, leaving
+ * the user with a stale file where they had moved it and a fresh one they never
+ * asked for, with nothing to tell them the two had diverged.
+ */
+async function assertNoSaveConflict(uuid: string, filePath: string): Promise<boolean> {
   const api = getWindowApi()
   if (!api?.readChartFile) {
-    return
+    return true
   }
 
   const result = await api.readChartFile(filePath)
 
-  // File is missing (or unreadable / no path support): nothing to protect.
-  if (!result.success || result.content == null) {
-    return
+  // The file is gone. Not a conflict, but not a target either.
+  if (result.success && result.missing) {
+    return false
   }
 
-  const existingUuid = await getStoredChartUuid(result.content)
+  // Unreadable, or no path support in this build: nothing to protect.
+  if (!result.success || result.content == null) {
+    return true
+  }
+
+  assertFileHoldsChart(result.content, uuid, filePath)
+  return true
+}
+
+// Shared by both write-through paths. The browser one reaches its file through
+// a stored handle rather than a path, but the question is identical: does the
+// file this save is about to replace still hold this chart?
+async function assertFileHoldsChart(content: string, uuid: string, label: string): Promise<void> {
+  const existingUuid = await getStoredChartUuid(content)
   if (existingUuid === uuid) {
     return
   }
 
   if (existingUuid === null) {
-    throw new Error(`Save blocked: "${filePath}" exists but is not a chart backup, so it was not overwritten. Use "Save as..." to pick a different location.`)
+    throw new Error(`Save blocked: "${label}" exists but is not a chart backup, so it was not overwritten. Use "Save as..." to pick a different location.`)
   }
 
-  throw new Error(`Save blocked: "${filePath}" now contains a different chart and was not overwritten. Use "Save as..." to pick a different location.`)
+  throw new Error(`Save blocked: "${label}" now contains a different chart and was not overwritten. Use "Save as..." to pick a different location.`)
+}
+
+/**
+ * The same check for the browser's write-through, which had none at all.
+ *
+ * A stored handle outlives the chart it belongs to: deleting a chart used to
+ * leave its handle in IndexedDB, and re-importing the chart's backup brings the
+ * same uuid back - the uuid lives inside the file - so a plain Ctrl+S would
+ * reuse the handle and overwrite whatever file that chart was last saved to,
+ * with no picker and nothing checked. `destroyChart` now drops the handle, and
+ * this makes the reuse safe even for a handle that survives some other way.
+ */
+async function assertHandleHoldsChart(uuid: string, handle: StoredFileHandle): Promise<boolean> {
+  if (typeof handle.getFile !== 'function') {
+    return true
+  }
+
+  let content: string
+  try {
+    content = await (await handle.getFile()).text()
+  }
+  catch {
+    // The file behind the handle is gone or unreadable. Fall back to the dialog
+    // rather than writing through to something that may no longer be there.
+    return false
+  }
+
+  // An empty file is a fresh target, not a conflict.
+  if (!content.trim()) {
+    return true
+  }
+
+  await assertFileHoldsChart(content, uuid, handle.name)
+  return true
 }
 
 // Saves the active chart to its own remembered path (if it has one).
@@ -489,7 +546,12 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
   if (mode === 'save' && !getWindowApi()?.saveChartFile) {
     const stored = await getRememberedFileHandle(uuid)
     if (stored && await ensureWritePermission(stored)) {
-      writeHandle = stored
+      // Throws when the file holds a different chart, exactly as the desktop
+      // path does; returns false when it has gone, in which case the picker
+      // opens instead of writing through to a file that is not there.
+      if (await assertHandleHoldsChart(uuid, stored)) {
+        writeHandle = stored
+      }
     }
   }
 
@@ -508,12 +570,13 @@ async function saveChartToFile({ mode }: { mode: SaveChartMode }): Promise<strin
   // always goes through the dialog, and the main process is told which mode
   // this is so it never silently overwrites a file it wasn't explicitly asked to.
   const rememberedPath = getRememberedChartFilePath(uuid)
-  const filePath = mode === 'save' && rememberedPath ? rememberedPath : undefined
+  let filePath = mode === 'save' && rememberedPath ? rememberedPath : undefined
 
   // Before a dialog-free write-through, make sure the file on disk still
-  // belongs to this chart; refuse if it now holds something else.
-  if (filePath) {
-    await assertNoSaveConflict(uuid, filePath)
+  // belongs to this chart; refuse if it now holds something else, and fall back
+  // to the dialog if it is no longer there at all.
+  if (filePath && !await assertNoSaveConflict(uuid, filePath)) {
+    filePath = undefined
   }
 
   // Set when the browser File System Access path handled the write. Its
@@ -845,11 +908,25 @@ export async function importTopsters2(event: Event) {
         alert('Charts imported successfully!')
       }
 
-      newCharts.forEach(ch => appendChart(ch))
+      // Move every imported cover into the asset store before the chart is
+      // written, exactly as `importChart` does. Skipping this put the backup's
+      // images - which can be `data:` URLs - straight into localStorage as part
+      // of the chart, against an origin budget of a few megabytes.
+      const importedUuids: string[] = []
+      for (const chart of newCharts) {
+        chart.data = await persistChartAssets(chart.data)
+        importedUuids.push(appendChart(chart))
+      }
 
-      // Set the newly imported chart to currently active
-      setActiveChart(getNewestChartUuid())
-      forceRefresh()
+      // Activate a chart that was actually imported. `getNewestChartUuid` sorts
+      // by timestamp across every chart the user owns, so a backup carrying
+      // older timestamps switched to some unrelated chart instead - and it ran
+      // even when every chart had failed and nothing had been imported at all.
+      const lastImported = importedUuids[importedUuids.length - 1]
+      if (lastImported) {
+        setActiveChart(lastImported)
+        forceRefresh()
+      }
     }
     catch (e) {
       console.error(e)

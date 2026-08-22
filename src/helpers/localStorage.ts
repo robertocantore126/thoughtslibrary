@@ -2,6 +2,7 @@
 
 import { v4 as uuidv4 } from 'uuid'
 import { BackgroundTypes, type OldStoredChart, type StoredChart, type StoredCharts, type StoredPremigrationChart } from '../types'
+import { forgetFileHandle } from './fileHandles'
 
 // The last path a chart was saved to, remembered per chart UUID so one
 // chart's file can never be silently reused as another chart's save target.
@@ -45,10 +46,17 @@ export function getActiveChart(): StoredChart {
   return getStoredCharts()[getActiveChartUuid()]
 }
 
-export function getNewestChartUuid() {
-  const chartEntries = Object.entries(getStoredCharts())
+// Null when there are no charts at all. The unguarded `[0][0]` this replaced
+// threw a TypeError on an empty store, which is reachable from the Topsters 2
+// import path and from a store that failed to parse.
+export function getNewestChartUuid(): string | null {
+  const chartEntries = Object.entries(getStoredChartsSnapshot())
 
-  return chartEntries.sort((a, b) => b[1].timestamp - a[1].timestamp)[0][0]
+  if (chartEntries.length === 0) {
+    return null
+  }
+
+  return chartEntries.sort((a, b) => (b[1]?.timestamp || 0) - (a[1]?.timestamp || 0))[0][0]
 }
 
 export function destroyChart(uuid: string) {
@@ -59,19 +67,75 @@ export function destroyChart(uuid: string) {
 
   // Don't leave a stale remembered path behind for a deleted chart.
   forgetChartFilePath(uuid)
+
+  // Nor a stale write handle. Re-importing the chart's backup file brings the
+  // same uuid back (it is stored inside the file), so a handle left behind here
+  // would let a later plain save write straight through to whatever file the
+  // deleted chart was last saved to, with no picker and no conflict check.
+  void forgetFileHandle(uuid).catch((error) => {
+    console.error('Could not forget the file handle for a deleted chart:', error)
+  })
 }
 
 export function getUuids() {
-  const charts = getStoredCharts()
-  return Object.keys(charts)
+  return Object.keys(getStoredChartsSnapshot())
 }
 
 export function setStoredCharts(charts: StoredCharts): void {
   return localStorage.setItem('charts', JSON.stringify(charts))
 }
 
+// Parsing the whole store is the expensive part of reading it, and the raw
+// string is cheap to compare. Callers that only read go through the snapshot so
+// that re-reading on every store mutation costs a `getItem` rather than a full
+// parse of every chart the user owns.
+let snapshotRaw: string | null = null
+let snapshotValue: StoredCharts = {}
+
+export function getStoredChartsSnapshot(): Readonly<StoredCharts> {
+  const raw = localStorage.getItem('charts') || '{}'
+
+  if (raw !== snapshotRaw) {
+    snapshotRaw = raw
+    snapshotValue = parseStoredCharts(raw)
+  }
+
+  return snapshotValue
+}
+
+// A value that is not parseable, or that parses to something other than an
+// object, must not throw: `getStoredCharts` runs before the app is rendered, and
+// a throw there leaves the user staring at a blank page with every chart still
+// in storage and no way to reach it. The unreadable value is preserved under a
+// separate key so it can be recovered by hand rather than overwritten.
+function parseStoredCharts(raw: string): StoredCharts {
+  try {
+    const parsed = JSON.parse(raw) as unknown
+
+    if (!parsed || typeof parsed !== 'object') {
+      throw new TypeError('Stored charts are not an object')
+    }
+
+    return parsed as StoredCharts
+  }
+  catch (error) {
+    console.error('Could not read stored charts:', error)
+
+    try {
+      if (raw && raw !== '{}' && !localStorage.getItem('unreadableChartsBackup')) {
+        localStorage.setItem('unreadableChartsBackup', raw)
+      }
+    }
+    catch (backupError) {
+      console.error('Could not preserve the unreadable charts value:', backupError)
+    }
+
+    return {}
+  }
+}
+
 export function getStoredCharts(): StoredCharts {
-  return JSON.parse(localStorage.getItem('charts') || '{}') as StoredCharts
+  return parseStoredCharts(localStorage.getItem('charts') || '{}')
 }
 
 export function updateStoredChart(updatedChart: StoredChart, uuid: string) {
@@ -121,6 +185,10 @@ export function newStructureMigration() {
     let activeUuid = null
 
     charts.forEach((chart) => {
+      if (!chart || !chart.data) {
+        return
+      }
+
       const uuid = uuidv4()
       newObj[uuid] = {
         timestamp: chart.timestamp,
@@ -133,7 +201,11 @@ export function newStructureMigration() {
     })
 
     setStoredCharts(newObj)
-    setActiveChart(activeUuid || Object.keys(newObj)[0])
+
+    const firstUuid = Object.keys(newObj)[0]
+    if (activeUuid || firstUuid) {
+      setActiveChart(activeUuid || firstUuid)
+    }
   }
 }
 
@@ -147,9 +219,17 @@ export function localStorageMigrations() {
   Object.keys(charts).forEach((uuid) => {
     const chart = charts[uuid] as StoredPremigrationChart
 
-    // Accumulate: assigning here overwrote every earlier chart's result, so
-    // with 2+ charts only the last one's migration was ever persisted.
-    changed ||= migrateChart(chart)
+    // One unmigratable entry must not stop the other charts from being
+    // migrated, and must never propagate out of here: this runs before the app
+    // is rendered, so a throw leaves the user with a blank page and no way in.
+    try {
+      // Accumulate: assigning here overwrote every earlier chart's result, so
+      // with 2+ charts only the last one's migration was ever persisted.
+      changed ||= migrateChart(chart)
+    }
+    catch (error) {
+      console.error(`Could not migrate chart ${uuid}:`, error)
+    }
   })
 
   if (changed) {
@@ -162,7 +242,7 @@ export function localStorageMigrations() {
 function backfillItemIds(chart: StoredPremigrationChart): boolean {
   let changed = false
 
-  const coordinates = chart.data.coordinates
+  const coordinates = chart.data?.coordinates
   if (coordinates) {
     for (const item of Object.values(coordinates)) {
       if (item && !item.id) {
@@ -172,10 +252,10 @@ function backfillItemIds(chart: StoredPremigrationChart): boolean {
     }
   }
 
-  const relatedLayers = chart.data.relatedLayers
+  const relatedLayers = chart.data?.relatedLayers
   if (relatedLayers) {
     for (const layer of Object.values(relatedLayers)) {
-      for (const item of Object.values(layer)) {
+      for (const item of Object.values(layer || {})) {
         if (item && !item.id) {
           item.id = uuidv4()
           changed = true
@@ -190,6 +270,12 @@ function backfillItemIds(chart: StoredPremigrationChart): boolean {
 // Applies migrations to a single chart and returns whether changes were made
 export function migrateChart(chart: StoredPremigrationChart) {
   let changed = false
+
+  // An entry with no `data` cannot be migrated and must not be dereferenced.
+  // Older builds could write one, and every field below assumed it was there.
+  if (!chart || !chart.data || typeof chart.data !== 'object') {
+    return false
+  }
 
   if (backfillItemIds(chart)) {
     changed = true
