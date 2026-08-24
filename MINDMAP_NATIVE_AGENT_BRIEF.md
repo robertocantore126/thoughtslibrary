@@ -179,6 +179,12 @@ export const useMindmapStore: StoreDefinition<'mindmap', {
   undo: () => boolean   // false when this history is empty — see Lane F
   redo: () => boolean
 }>
+
+// MindmapCanvas.vue — Lane E, mounted by Lane F
+// TAKES NO PROPS AND EMITS NOTHING. It reads useMindmapStore directly and
+// fills its parent. Lane F writes exactly `<MindmapCanvas />` and nothing
+// else: props would be a second channel for state the store already owns,
+// and the two would drift the first time one of them was updated alone.
 ```
 
 ## §0.4 File ownership — exhaustive
