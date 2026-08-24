@@ -56,6 +56,12 @@ export interface Chart {
   coordinates?: ChartCoordinates
   tileNotes?: Record<string, string> // legacy support for older saved charts
   relatedLayers?: Record<string, RelatedLayer> // keyed by parent ChartItem.id
+  // Keyed by ChartItem.id for the same reason relatedLayers is: moving,
+  // swapping or resizing rearranges coordinates, and an id-keyed entry
+  // re-finds its tile wherever it lands. The VALUE is a sheet id, not a
+  // sheet — the bytes live in the mindmaps IndexedDB store, because a chart
+  // goes to localStorage and one 400-topic map would eat the whole quota.
+  mindmaps?: Record<string, string>
   links?: TileLink[] // arrows between tiles, by ChartItem.id
   items: Array<ChartItem | null>
   size: ChartSize
