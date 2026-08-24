@@ -2,25 +2,28 @@
 import type { NodeSize } from '../../../mindmap/layout'
 import type { MindNode, Sheet } from '../../../mindmap/types'
 import { computed } from 'vue'
+import { edgeVisible, rectOf, type Viewport } from '../../../mindmap/cull'
 import { edgePath, type Rect } from '../../../mindmap/geometry'
 import { useMindmapStore } from '../../../mindmap/store'
 
-// The canvas measures every node and hands the batch down; the store's own
-// copy (kept for fit()) is not part of the frozen contract type.
+// Takes the FULL node list and size cache, not a culled list: it needs the
+// rects of off-screen endpoints to decide whether an edge crosses the screen
+// (MINDMAP_S2_AGENT_BRIEF M1.3). Drawing only when BOTH endpoints are visible
+// leaves children floating with no connector the moment their parent pans out
+// of the cushion — the S2 M1 regression this `edgeVisible` union test fixes.
 const props = defineProps<{
+  nodes: MindNode[]
   sizes: Record<string, NodeSize>
+  viewport: Viewport | null
+  margin: number
 }>()
 
-// A node with no measured size yet (the canvas measures on its first pass) —
-// the edge may be a frame off for one render, never a crash.
-const FALLBACK: Rect = { x: 0, y: 0, w: 120, h: 40 }
 const PAD = 12
 
 const store = useMindmapStore()
 
-// Collapsed subtrees are pruned from layout and hidden by the canvas, so the
-// edges under them must vanish too — a dangling curve to an invisible node is
-// the one kind of edge that reads as a rendering bug.
+// Collapsed subtrees are pruned from layout and hidden; a curve to a folded-away
+// node reads as a rendering bug, so those pairs never draw.
 function hiddenIds(sheet: Sheet): Set<string> {
   const set = new Set<string>()
   const walk = (id: string, underCollapsed: boolean) => {
@@ -40,29 +43,38 @@ function hiddenIds(sheet: Sheet): Set<string> {
   return set
 }
 
-function rectOf(node: MindNode): Rect {
-  const size = props.sizes[node.id]
-  return {
-    x: node.position.x,
-    y: node.position.y,
-    w: size?.w ?? FALLBACK.w,
-    h: size?.h ?? FALLBACK.h,
-  }
-}
+// An edge is drawn when its curve can reach the padded viewport — even if one
+// or both endpoints sit just off-screen. `box` is the union of the two endpoint
+// rects (plus a little room for the bulge is added by edgeVisible; this is the
+// geometry for the SVG bounds below). The SVG box is the union of the DRAWn
+// edges plus a pad, so the layer stays small on a huge map and no bulge is
+// clipped.
 
+// Curve geometry is pure world data — a pan must never rebuild it. The path
+// strings are the expensive part (a 3,000-topic map draws thousands of them),
+// so they are computed HERE, without the camera in the dependency graph, and
+// only the visibility filter below depends on the viewport. That keeps the
+// single-transform rule honest: panning touches the CSS transform alone, and
+// Vue's stable-keyed v-for patches nothing when the filtered set is unchanged.
+// The endpoint rects ride along so edgeVisible has what it needs without a
+// second pass.
 interface Edge {
   key: string
   d: string
+  box: Rect
+  parent: Rect
+  child: Rect
 }
 
-const edges = computed<Edge[]>(() => {
+const edgeGeometry = computed<Edge[]>(() => {
   const sheet = store.sheet
   if (!sheet) {
     return []
   }
   const hidden = hiddenIds(sheet)
   const out: Edge[] = []
-  for (const node of store.visibleNodes) {
+  const seen = new Set<string>()
+  for (const node of props.nodes) {
     if (hidden.has(node.id) || node.collapsed) {
       continue
     }
@@ -74,29 +86,46 @@ const edges = computed<Edge[]>(() => {
       if (!child) {
         continue
       }
-      out.push({
-        key: `${node.id}->${childId}`,
-        d: edgePath(rectOf(node), rectOf(child)),
-      })
+      const key = `${node.id}->${childId}`
+      if (seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+      const parentRect = rectOf(node, props.sizes)
+      const childRect = rectOf(child, props.sizes)
+      const box: Rect = {
+        x: Math.min(parentRect.x, childRect.x),
+        y: Math.min(parentRect.y, childRect.y),
+        w: Math.max(parentRect.x + parentRect.w, childRect.x + childRect.w) - Math.min(parentRect.x, childRect.x),
+        h: Math.max(parentRect.y + parentRect.h, childRect.y + childRect.h) - Math.min(parentRect.y, childRect.y),
+      }
+      out.push({ key, d: edgePath(parentRect, childRect), box, parent: parentRect, child: childRect })
     }
   }
   return out
 })
 
-// The SVG is sized to the map bounds plus a small pad so strokes at the outer
-// edges are not clipped by the viewport. In world units, inside the canvas's
-// transformed world, so the whole layer scales with the camera.
+const edges = computed<Edge[]>(() => {
+  const vp = props.viewport
+  if (!vp) {
+    return []
+  }
+  return edgeGeometry.value.filter(e => edgeVisible(e.parent, e.child, vp, props.margin))
+})
+
 const bounds = computed<Rect>(() => {
+  // Union of the drawn edges' boxes plus a pad, so the SVG clips no stroke at
+  // its extremes. Zero rect when nothing is drawn (the guard the first attempt
+  // got right and must survive).
   let minX = Number.POSITIVE_INFINITY
   let minY = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
   let maxY = Number.NEGATIVE_INFINITY
-  for (const node of store.visibleNodes) {
-    const r = rectOf(node)
-    minX = Math.min(minX, r.x)
-    minY = Math.min(minY, r.y)
-    maxX = Math.max(maxX, r.x + r.w)
-    maxY = Math.max(maxY, r.y + r.h)
+  for (const edge of edges.value) {
+    minX = Math.min(minX, edge.box.x)
+    minY = Math.min(minY, edge.box.y)
+    maxX = Math.max(maxX, edge.box.x + edge.box.w)
+    maxY = Math.max(maxY, edge.box.y + edge.box.h)
   }
   if (!Number.isFinite(minX)) {
     return { x: 0, y: 0, w: 0, h: 0 }
@@ -111,7 +140,7 @@ const bounds = computed<Rect>(() => {
 </script>
 
 <template>
-  <!-- One SVG for all edges, beneath the topics (rendered first). Like
+  <!-- One SVG for the drawn edges, beneath the topics (rendered first). Like
   TileLinks: decoration only — pointer-events none so every click lands on the
   map itself. -->
   <svg

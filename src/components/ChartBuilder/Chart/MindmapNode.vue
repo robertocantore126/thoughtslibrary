@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import type { MindNode } from '../../../mindmap/types'
 import { computed, nextTick, ref } from 'vue'
-import { LINE_HEIGHT_FACTOR, MAX_TOPIC_W, MIN_TOPIC_W, TEXT_INSET } from '../../../mindmap/layout'
+import { topicBoxStyle, topicVisualStyle } from '../../../mindmap/nodeStyle'
 import { useMindmapStore } from '../../../mindmap/store'
 
-// The canvas renders one of these per visible node and measures the box. The
-// sizing constants come from Lane B's layout module so the CSS the browser
-// wraps against is the same arithmetic the layout engine used to place the
-// node — two hand-written numbers here are how they quietly disagree.
+// The canvas renders one of these per visible node. Position is per-instance
+// here; every box-affecting style comes from topicBoxStyle, the SAME helper the
+// hidden measure layer uses (MINDMAP_S2_AGENT_BRIEF M1.2/M2 — one stylesheet for
+// one box, so layout measures the exact browser wrap). Chart look is the
+// default: fontFamily/textColor inherit from the overlay (chart.font /
+// chart.textColor), so this component sets them only when node.style sets them.
 const props = defineProps<{
   node: MindNode
-  hidden: boolean
 }>()
 
 const store = useMindmapStore()
@@ -20,10 +21,10 @@ const isSelected = computed(() => store.selection === props.node.id)
 const nodeStyle = computed(() => ({
   left: `${props.node.position.x}px`,
   top: `${props.node.position.y}px`,
-  minWidth: `${MIN_TOPIC_W}px`,
-  maxWidth: `${MAX_TOPIC_W}px`,
-  padding: `${TEXT_INSET}px`,
-  lineHeight: `${LINE_HEIGHT_FACTOR}`,
+  ...topicBoxStyle(props.node),
+  // Visual style is non-box (M2): a fill/opacity change must not re-invalidate
+  // measurement, hence it lives apart from topicBoxStyle.
+  ...topicVisualStyle(props.node),
 }))
 
 // --- rename in place ------------------------------------------------------
@@ -105,7 +106,7 @@ function toggleCollapsed() {
 <template>
   <div
     class="mindmap-node"
-    :class="{ 'selected': isSelected, 'is-hidden': props.hidden }"
+    :class="{ selected: isSelected }"
     :style="nodeStyle"
     @click="onNodeClick"
     @dblclick="onNodeDblclick"
@@ -133,36 +134,13 @@ function toggleCollapsed() {
 </template>
 
 <style scoped>
-.mindmap-node {
-  position: absolute;
-  box-sizing: border-box;
-  background: rgba(0, 0, 0, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  border-radius: 8px;
-  color: inherit;
-  font-size: 14px;
-  text-align: left;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  user-select: none;
-  cursor: default;
-}
-
 .mindmap-node.selected {
   outline: 2px solid #ff7f50;
   outline-offset: 2px;
 }
 
-/* Collapsed descendants stay in the DOM (they are still measured) but are
-   not painted and swallow no clicks. */
-.mindmap-node.is-hidden {
-  visibility: hidden;
-}
-
-.mindmap-node-title {
-  display: block;
-}
+/* Box-affecting rules live in the SHARED `.mindmap-node` class in global.css,
+   not here — see MINDMAP_S2_AGENT_BRIEF M1.2's "one stylesheet" rule. */
 
 .mindmap-node-editor {
   outline: none;
