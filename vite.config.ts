@@ -13,4 +13,11 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    // Mindmap logic (ops, history, layout, geometry) is pure TypeScript with
+    // no DOM access by design (MINDMAP_NATIVE_AGENT_BRIEF §0.5), so the suite
+    // runs in node and jsdom is never needed.
+    environment: 'node',
+    include: ['tests/**/*.test.ts'],
+  },
 })

@@ -11,7 +11,8 @@
     "desktop:dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173\" \"wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://127.0.0.1:5173 electron .\"",
     "desktop:dist": "npm run build && electron-builder --win portable",
     "lint": "eslint .",
-    "lint-fix": "eslint . --fix"
+    "lint-fix": "eslint . --fix",
+    "test": "vitest run"
   },
   "dependencies": {
     "bootstrap-icons-vue": "^1.11.3",
@@ -36,8 +37,10 @@
     "electron": "^37.2.6",
     "electron-builder": "^26.0.12",
     "eslint": "^9.16.0",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "^5.6.3",
     "vite": "^6.0.11",
+    "vitest": "^2.1.8",
     "vue-tsc": "^2.2.0",
     "wait-on": "^8.0.3"
   },
