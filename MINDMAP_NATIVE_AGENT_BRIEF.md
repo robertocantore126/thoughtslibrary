@@ -401,10 +401,25 @@ Round 2 against an unmerged Round 1.**
 
 ---
 
-# ROUND 2 — three lanes, one shared dependency
+# ROUND 2 — the UI
 
-All three branch from `main` after the Round 1 merge. They call each other only
-through §0.3.
+**Round 2 is being done by ONE agent, working through Lanes D, E and F in that
+order on a single branch.** The file-ownership table in §0.4 no longer
+partitions work between agents; read it now as the list of files this task is
+allowed to touch, and nothing outside it.
+
+Two things still hold, and they matter more here than they did in Round 1:
+
+- **§0.3 is still frozen.** Lanes D, E and F already have callers and tests
+  written against those signatures. Changing one to suit the component you are
+  writing at that moment breaks the two you already finished.
+- **Finish and verify a lane before starting the next.** E is testable the
+  moment it renders a supplied sheet; F is the only lane that edits existing
+  files. Carrying an unfinished E into F means debugging two new things at
+  once, in the one part of this build that tests cannot catch for you.
+
+Lane D landed in Round 1 — it is already on `main`, with 17 tests. Start at
+Lane E.
 
 ## Lane D — the mindmap store
 
