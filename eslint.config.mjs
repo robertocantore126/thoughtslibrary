@@ -13,6 +13,7 @@ export default antfu({
     'LAYERS_AGENT_BRIEFS.md',
     'REVIEW.md',
     'MINDMAP_NATIVE_AGENT_BRIEF.md',
+    'MINDMAP_S2_AGENT_BRIEF.md',
     'MINDMAP_TILE_AGENT_BRIEF.md',
     'LAYER_CANVAS_AGENT_BRIEF.md',
   ],
