@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import type { Style } from '../../../mindmap/types'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { importRnode } from '../../../helpers/rnodeImport'
 import { useMindmapStore } from '../../../mindmap/store'
 import { useStore } from '../../../store'
 import MindmapCanvas from './MindmapCanvas.vue'
@@ -129,45 +128,6 @@ function clearStyle(...fields: (keyof Style)[]) {
   mindmap.clearNodeStyle(node.id, fields)
 }
 
-// ---------------------------------------------------------------------------
-// M4 — .rnode import
-// ---------------------------------------------------------------------------
-// Importing an existing r-node map moves the user's documents onto this tile:
-// read a .rnode.json, store it under a FRESH sheet id (never the file's — S1
-// §T.6), point the tile's chart.mindmaps entry at it, and open the result.
-// Image references travel as-is; S2 leaves them for a later stage to resolve.
-const fileInput = ref<HTMLInputElement | null>(null)
-const importError = ref<string | null>(null)
-
-function triggerImport() {
-  importError.value = null
-  fileInput.value?.click()
-}
-
-async function onImportPicked(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = '' // allow picking the same file again
-  if (!file) {
-    return
-  }
-  try {
-    const result = await importRnode(await file.text())
-    const itemId = hostItemId.value
-    if (itemId) {
-      store.setMindmapSheetId(itemId, result.sheetId)
-    }
-    // A fresh map deserves a fresh framing, not the old sheet's camera. Re-arm
-    // the backstop so the previous sheet's timer cannot frame this one early.
-    didAutoFit = false
-    await mindmap.open(result.sheetId)
-    armFitBackstop()
-  }
-  catch (err) {
-    importError.value = err instanceof Error ? err.message : 'Import failed.'
-  }
-}
-
 function addChild() {
   const sheet = mindmap.sheet
   if (!sheet) {
@@ -262,23 +222,10 @@ onUnmounted(() => {
           <button title="Frame the whole map in the view" @click="fitToView">
             Fit
           </button>
-          <button title="Import an existing r-node map (.rnode.json)" @click="triggerImport">
-            Import…
-          </button>
           <button class="mindmap-close" title="Close (Esc)" @click="closeOverlay">
             Close
           </button>
         </div>
-      </div>
-      <input
-        ref="fileInput"
-        class="mindmap-import-input"
-        type="file"
-        accept=".json,application/json"
-        @change="onImportPicked"
-      >
-      <div v-if="importError" class="mindmap-import-error">
-        {{ importError }}
       </div>
       <div ref="bodyRef" class="mindmap-body">
         <MindmapCanvas @settled="onMeasureSettled" />
@@ -565,17 +512,6 @@ onUnmounted(() => {
 .mindmap-toolbar-actions .mindmap-close {
   border-color: rgba(255, 127, 80, 0.7);
   color: #ff7f50;
-}
-
-.mindmap-import-input {
-  display: none;
-}
-
-.mindmap-import-error {
-  flex: none;
-  color: #ff7f50;
-  font-size: 12.5px;
-  padding: 0 4px;
 }
 
 .mindmap-body {

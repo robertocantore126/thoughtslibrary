@@ -230,30 +230,16 @@ fields on the selected topic.
 
 ---
 
-# M4. `.rnode` import
+# M4. ~~`.rnode` import~~ — DROPPED
 
-The point of this: the user's existing maps live in r-node, and this is how
-they move. Real documents are in `C:\Users\39389\Downloads` — `esempio.rnode.json`
-(37 topics), `MiaMappa.rnode` (54), `ciuccia.rnode` (~3,000). Test against all
-three.
+Built, then removed at the user's request: mindmaps are authored in
+thoughtslibrary, and importing existing r-node documents is not wanted. The
+helper, its tests and the overlay's Import button are gone; the code is in git
+history if that ever changes.
 
-`src/helpers/rnodeImport.ts` (new file):
-
-- Accept `.rnode.json` — a plain `RnodeDocument`. Take `sheets[0]`; r-node is
-  single-sheet in practice.
-- Write the sheet through `writeSheet` under a **fresh** id and point the tile's
-  `chart.mindmaps[itemId]` at it. Never reuse an id from the file (§T.6 of the
-  S1 brief: sheet ids are per-machine keys).
-- **Validate before storing.** A file that is not an R-node document must
-  produce a message, not a corrupt sheet. Check `schemaVersion`, a non-empty
-  `nodes` record, and that `rootNodeId` resolves.
-- Images are **out of scope for S2.** A `.rnode.json` references assets by
-  SHA-256 that this machine does not have; import the structure, and where a
-  node carries an image id with no bytes, leave the reference intact so a later
-  stage can resolve it. Do not silently strip it.
-
-`.rnode.zip` and `.rnode` (SQLite) are **not** in S2. Report what it would take
-rather than starting them.
+What replaced it as the priority is `MINDMAP_S3_AGENT_BRIEF.md` — the saved
+chart JSON does not currently carry mindmap content at all, which is silent
+data loss on the save path.
 
 ---
 
