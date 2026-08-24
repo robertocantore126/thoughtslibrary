@@ -2,9 +2,11 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 import { useResolvedImageUrl } from '../composables/useResolvedImageUrl'
 import { storeLocalImage } from '../helpers/assets'
+import { useMindmapStore } from '../mindmap/store'
 import { useStore } from '../store'
 
 const store = useStore()
+const mindmap = useMindmapStore()
 const THOUGHT_ICON_URL = '/thought_tile.svg'
 
 const titledItems = computed(() =>
@@ -131,6 +133,21 @@ function handleUndoHotkey(event: KeyboardEvent) {
   const isTextField = !!activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')
   if (isTextField) {
     store.undoTextEdit()
+    return
+  }
+
+  // While the mindmap overlay is open, Ctrl+Z belongs to the map's own
+  // history (Shift+Z redoes it). When the map's history is empty, fall
+  // through to the chart stack rather than swallowing the key — the map is a
+  // session nested in the chart, and its undos end where the chart's begin
+  // (Lane F).
+  if (store.mindmapKey) {
+    if (event.shiftKey) {
+      mindmap.redo()
+    }
+    else if (!mindmap.undo()) {
+      store.undoChartChange()
+    }
     return
   }
 

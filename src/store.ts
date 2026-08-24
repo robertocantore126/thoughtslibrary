@@ -17,6 +17,7 @@ export interface State {
   collapsed: boolean
   selection: Selection | null
   notesPopupKey: Selection | null
+  mindmapKey: Selection | null
   focusedTileId: string | null
   resizeBlockMessage: string | null
   // Timestamp of the last successful save to a file. Bumped on every save so a
@@ -502,6 +503,7 @@ export const initialState = {
   collapsed: true,
   selection: null,
   notesPopupKey: null,
+  mindmapKey: null,
   focusedTileId: null,
   resizeBlockMessage: null,
   lastSavedAt: null,
@@ -661,6 +663,7 @@ export const useStore = defineStore('store', {
       if (this.selection && !resolveItemAt(this.chart, this.selection)) {
         this.selection = null
         this.notesPopupKey = null
+        this.mindmapKey = null
       }
     },
     // Swaps one item's cover or attachment for a copy now held in the local
@@ -822,6 +825,7 @@ export const useStore = defineStore('store', {
       const item = this.chart.coordinates?.[key]
       this.selection = item ? { kind: 'tile', key } : null
       this.notesPopupKey = item && item.notes?.trim() ? { kind: 'tile', key } : null
+      this.mindmapKey = null
     },
     markChartSaved() {
       this.lastSavedAt = Date.now()
@@ -834,9 +838,37 @@ export const useStore = defineStore('store', {
         this.notesPopupKey = this.selection
       }
     },
+    // Mindmaps are a grid-tile feature (Lane F): a layer tile never gets one.
+    // Opening a mindmap makes the whole editing session a single chart change
+    // — the snapshot is pushed once here, before any mindmap edit, and none
+    // are pushed while the overlay is open, so one Ctrl+Z after closing
+    // reverts the session. The notes popup is closed because the overlay's
+    // backdrop is near-opaque; left open, it would reappear on close.
+    openMindmap() {
+      if (!this.selection || this.selection.kind !== 'tile' || this.mindmapKey) {
+        return
+      }
+      this.mindmapKey = this.selection
+      this.notesPopupKey = null
+      this.recordChartChange()
+    },
+    closeMindmap() {
+      this.mindmapKey = null
+    },
+    // Records which sheet a tile's mindmap lives in, called once when the
+    // overlay creates a fresh sheet. The chart carries the ID, never the
+    // sheet — the bytes live in the mindmaps IndexedDB store, because a chart
+    // goes to localStorage and one 400-topic map would eat the whole quota.
+    setMindmapSheetId(itemId: string, sheetId: string) {
+      this.chart = {
+        ...this.chart,
+        mindmaps: { ...(this.chart.mindmaps || {}), [itemId]: sheetId },
+      }
+    },
     clearActiveTile() {
       this.selection = null
       this.notesPopupKey = null
+      this.mindmapKey = null
     },
     setActiveTileNote(note: string) {
       const selection = this.selection
@@ -1106,6 +1138,7 @@ export const useStore = defineStore('store', {
       }
       this.selection = null
       this.notesPopupKey = null
+      this.mindmapKey = null
       this.focusedTileId = null
       this.resizeBlockMessage = null
       this.textUndoStack = []
@@ -1117,6 +1150,7 @@ export const useStore = defineStore('store', {
       this.chart = createEmptyChart()
       this.selection = null
       this.notesPopupKey = null
+      this.mindmapKey = null
       this.focusedTileId = null
       this.resizeBlockMessage = null
       this.textUndoStack = []

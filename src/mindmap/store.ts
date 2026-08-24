@@ -194,8 +194,10 @@ export const useMindmapStore = defineStore('mindmap', {
       // Commit whatever write is still pending to the sheet it belongs to
       // before swapping it out — the same rule LocalStorageWatcher's pending
       // write follows, so an edit made just before switching is never lost to
-      // the sheet that replaces it.
-      this.flushSave()
+      // the sheet that replaces it. The write is AWAITED: flushSave normally
+      // fires and forgets, but readSheet below would race it — a read that
+      // wins returns the pre-edit sheet and the last edit silently vanishes.
+      await this.flushSave()
       const loaded = sheetId === null ? null : await readSheet(sheetId)
       const sheet = loaded ?? blankSheet('Untitled')
       if (!loaded) {
@@ -214,7 +216,7 @@ export const useMindmapStore = defineStore('mindmap', {
     async close() {
       // The last edit must survive the overlay closing even if its debounce
       // never fired; flush, then drop the sheet.
-      this.flushSave()
+      await this.flushSave()
       history.clear()
       this.sheet = null
       this.selection = null
@@ -411,17 +413,18 @@ export const useMindmapStore = defineStore('mindmap', {
     // Writes the current sheet, clearing any pending debounce. Safe to call at
     // any time; a failed write degrades silently rather than throwing — the
     // storage lane mirrors this posture, so an unavailable IndexedDB must
-    // never take the UI down with it.
-    flushSave() {
+    // never take the UI down with it. Returns a promise so open()/close() can
+    // await the write before a read or teardown depends on it.
+    flushSave(): Promise<void> {
       if (saveTimer) {
         clearTimeout(saveTimer)
         saveTimer = null
       }
       const sheet = this.sheet
       if (!sheet) {
-        return
+        return Promise.resolve()
       }
-      void writeSheet(sheet.sheetId, sheet).catch(() => {})
+      return writeSheet(sheet.sheetId, sheet).catch(() => {})
     },
   },
 }) as unknown as StoreDefinition<'mindmap', MindmapState, MindmapGetters, MindmapActions>

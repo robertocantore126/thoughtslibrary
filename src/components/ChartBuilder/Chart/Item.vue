@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import type { ComputedRef, CSSProperties } from 'vue'
 import type { ChartItem } from '../../../types'
-import { BIconX } from 'bootstrap-icons-vue'
+import { BIconDiagram3, BIconX } from 'bootstrap-icons-vue'
 import { v4 as uuidv4 } from 'uuid'
 import { computed } from 'vue'
 import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
 import { resolveDroppedImage } from '../../../helpers/imageDrop'
 import { isLinkDrag, readLinkSourceId, startLinkDrag } from '../../../helpers/linkDrag'
 import { useStore } from '../../../store'
+import MindmapOverlay from './MindmapOverlay.vue'
 
 const props = defineProps(['item', 'index', 'title', 'number'])
 
@@ -41,6 +42,10 @@ const tileKey = computed(() => `${tileCoordinates.value.x},${tileCoordinates.val
 const isActiveTile = computed(() => store.activeTileKey === tileKey.value)
 const isFocusedTile = computed(() => !!props.item && store.focusedTileId === props.item.id)
 const isDimmed = computed(() => !!store.focusedTileId && !isFocusedTile.value)
+// The one tile whose mindmap is open hosts the overlay; the chart store's
+// mindmapKey is the Selection, so only the matching Item mounts it.
+const isMindmapHost = computed(() => !!props.item && store.mindmapKey?.kind === 'tile' && store.mindmapKey.key === tileKey.value)
+const hasMindmap = computed(() => !!props.item && !!store.chart.mindmaps?.[props.item.id])
 const rawThoughtAttachmentUrl = computed(() => {
   const isThoughtLike = props.item?.itemType === 'thought' || props.item?.coverURL === '/thought_tile.svg'
   if (!isThoughtLike) {
@@ -252,6 +257,17 @@ function handleContextMenu() {
 function deleteItem() {
   store.addItem({ item: null, index: props.index })
 }
+
+// The entry point that opens a mindmap for this grid tile, following how the
+// notes popup is opened: select the tile first, then open — openMindmap reads
+// the selection. Related-layer tiles never carry a mindmap (Lane F).
+function openMindmap() {
+  if (!props.item) {
+    return
+  }
+  store.selectTile(tileCoordinates.value)
+  store.openMindmap()
+}
 </script>
 
 <template>
@@ -290,6 +306,7 @@ function deleteItem() {
       </div>
       <span v-if="props.item && store.tileHasLayer(props.item.id)" class="layer-indicator" aria-hidden />
       <span v-else-if="props.item?.notes?.trim()" class="notes-indicator" aria-hidden />
+      <span v-if="hasMindmap" class="mindmap-indicator" aria-hidden />
       <img
         v-if="thoughtAttachmentUrl"
         :src="thoughtAttachmentUrl"
@@ -306,6 +323,15 @@ function deleteItem() {
       >
         <BIconX />
       </button>
+      <button
+        v-if="props.item"
+        class="mindmap-button"
+        data-html2canvas-ignore
+        :title="hasMindmap ? 'Open mindmap' : 'New mindmap'"
+        @click.stop="openMindmap"
+      >
+        <BIconDiagram3 />
+      </button>
       <img
         v-if="item"
         :src="itemCoverUrl"
@@ -317,6 +343,7 @@ function deleteItem() {
     <p v-if="props.item && store.chart.showTitles" class="item-title" :style="titleStyle">
       {{ store.chart.showNumbers && props.number ? `${props.number}. ` : '' }}{{ props.title }}
     </p>
+    <MindmapOverlay v-if="isMindmapHost" />
   </div>
 </template>
 
@@ -375,6 +402,19 @@ function deleteItem() {
   border-radius: 50%;
   border: 2px solid #ffd700;
   background: transparent;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.mindmap-indicator {
+  /* Above the notes/layer dots so a tile can carry a map and notes at once. */
+  position: absolute;
+  right: 6px;
+  bottom: 22px;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #63ecff;
   pointer-events: none;
   z-index: 2;
 }
@@ -450,6 +490,38 @@ function deleteItem() {
   display: initial;
 }
 
+.mindmap-button {
+  /* Beside the delete button, which owns the top-right corner. */
+  display: none;
+  position: absolute;
+  top: 5px;
+  right: 38px;
+  height: 30px;
+  width: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  appearance: none;
+  background-color: rgba(0, 0, 0, 0.6);
+  border-radius: 5px;
+  color: #ffffff;
+  border: none;
+  cursor: pointer;
+}
+
+.mindmap-button:hover {
+  cursor: pointer;
+}
+
+.mindmap-button svg {
+  height: 100%;
+  width: 100%;
+}
+
+.item:hover .mindmap-button {
+  display: flex;
+}
+
 .placeholder {
   background-color: rgba(90, 90, 90, 0.6);
   touch-action: auto;
@@ -473,6 +545,10 @@ function deleteItem() {
 @media (hover: none) {
   .delete-button {
     display: initial;
+  }
+
+  .mindmap-button {
+    display: flex;
   }
 }
 </style>
