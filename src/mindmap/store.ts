@@ -1,4 +1,4 @@
-import type { MindNode, Sheet } from './types'
+import type { MindNode, Sheet, Style } from './types'
 /**
  * The mindmap store — the single owner of the open sheet, the selection, the
  * camera and the undo/redo history (MINDMAP_NATIVE_AGENT_BRIEF Lane D).
@@ -37,6 +37,8 @@ export interface MindmapActions {
   rename: (nodeId: string, title: string) => void
   remove: (nodeId: string) => void
   toggleCollapse: (nodeId: string) => void
+  setNodeStyle: (nodeId: string, patch: Partial<Style>) => void
+  clearNodeStyle: (nodeId: string, fields: (keyof Style)[]) => void
   select: (nodeId: string | null) => void
   panBy: (dx: number, dy: number) => void
   zoomAt: (sx: number, sy: number, factor: number) => void
@@ -308,6 +310,52 @@ export const useMindmapStore = defineStore('mindmap', {
         return
       }
       this.commit([makeOp('setCollapsed', { id: nodeId, collapsed: !node.collapsed, prev: node.collapsed })])
+    },
+    // Style edits are ops, not mutations (S2 M3 trap 5): a field merged into a
+    // fresh style object and committed through `setStyle` — whose PREV is the
+    // whole old style — so Ctrl+Z undoes a style change like any other edit and
+    // the same commit path marks dirty and debounces the save.
+    setNodeStyle(nodeId: string, patch: Partial<Style>) {
+      const sheet = this.sheet
+      const node = sheet?.nodes[nodeId]
+      if (!sheet || !node || Object.keys(patch).length === 0) {
+        return
+      }
+      const next: Style = { ...node.style }
+      let changed = false
+      for (const key of Object.keys(patch) as (keyof Style)[]) {
+        const value = patch[key]
+        if (next[key] !== value) {
+          next[key] = value as never
+          changed = true
+        }
+      }
+      if (!changed) {
+        return
+      }
+      this.commit([makeOp('setStyle', { id: nodeId, style: next, prev: node.style })])
+    },
+    // Removes fields entirely (not sets them to undefined) so a cleared colour
+    // genuinely falls back to the chart default rather than carrying an
+    // explicit-undefined through export.
+    clearNodeStyle(nodeId: string, fields: (keyof Style)[]) {
+      const sheet = this.sheet
+      const node = sheet?.nodes[nodeId]
+      if (!sheet || !node || fields.length === 0) {
+        return
+      }
+      const next: Style = { ...node.style }
+      let changed = false
+      for (const key of fields) {
+        if (key in next) {
+          delete next[key]
+          changed = true
+        }
+      }
+      if (!changed) {
+        return
+      }
+      this.commit([makeOp('setStyle', { id: nodeId, style: next, prev: node.style })])
     },
     select(nodeId: string | null) {
       if (nodeId !== null && !this.sheet?.nodes[nodeId]) {

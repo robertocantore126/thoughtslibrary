@@ -21,3 +21,46 @@
     object-fit: contain;
     filter: opacity(0.9);
 }
+
+/* --------------------------------------------------------------------------
+   Mindmap topic box — SHARED between the rendered node and the hidden measure
+   layer (MINDMAP_S2_AGENT_BRIEF M1.2).
+
+   Two stylesheets for the same box is two answers to "how wide is this
+topic", and the one layout uses will be the wrong one — so every box-affecting
+rule lives here, unscoped, and BOTH MindmapNode.vue (the rendered topic) and
+the canvas's `.mindmap-measure` layer (which measures a title it never paints)
+style their `.mindmap-node` from this one class. Never copy these rules into a
+scoped stylesheet; a second answer breaks measurement and repros as the
+pan-shifts-layout bug.
+
+   Box-affecting values stay in lockstep with Lane B's sizing constants
+(MIN_TOPIC_W 84, MAX_TOPIC_W 280, TEXT_INSET 6, LINE_HEIGHT_FACTOR 1.25) —
+growing one without the other makes layout disagree with the browser by one
+hard-coded number and layout will be the wrong one. (The schema's
+DEFAULT_STYLE.padding is the inspector-facing default, not this render inset.)
+   ----------------------------------------------------------------------- */
+.mindmap-node {
+    position: absolute;
+    box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.62);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 10px;
+    color: inherit;
+    font-size: 14px;
+    font-weight: 400;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    user-select: none;
+    cursor: default;
+    min-width: 84px;
+    max-width: 280px;
+    padding: 6px;
+    line-height: 1.25;
+}
+
+.mindmap-node-title {
+    display: block;
+}
