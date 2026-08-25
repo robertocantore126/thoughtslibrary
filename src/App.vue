@@ -5,6 +5,7 @@ import ChartBuilder from './components/ChartBuilder/index.vue'
 import LocalStorageWatcher from './components/LocalStorageWatcher.vue'
 import Sidebar from './components/Sidebar/index.vue'
 import TitlesSidebar from './components/TitlesSidebar.vue'
+import TracerButton from './components/TracerButton.vue'
 import { saveCurrentChartToFile } from './helpers/imports'
 import './global.css'
 
@@ -42,6 +43,10 @@ onUnmounted(() => {
 
 <template>
   <LocalStorageWatcher>
+    <!-- Outside main-shell so no pane's overflow can clip it, and rendered
+    unconditionally: the states worth capturing include the ones where the
+    rest of the app has not loaded. -->
+    <TracerButton />
     <div class="main-shell">
       <section class="left-pane">
         <Sidebar />
