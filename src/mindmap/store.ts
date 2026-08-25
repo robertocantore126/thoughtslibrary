@@ -67,8 +67,12 @@ export interface MindmapGetters {
 // carries it: without it the union is not reliably discriminated through
 // pinia's action typing, and `result.error` fails to narrow in the else branch.
 export type OpenResult =
-  | { ok: true, created: boolean, sheetId: string, error?: undefined }
-  | { ok: false, error: string }
+  | { ok: true, created: boolean, sheetId: string, error?: undefined, superseded?: false }
+  // `superseded` separates "this open failed" from "this open was overtaken".
+  // Only the first is the user's problem: the second means a later open (or a
+  // close) already decided what the store holds, so the caller must drop its
+  // result silently rather than report a failure nobody caused.
+  | { ok: false, error: string, superseded: boolean }
 
 export interface MindmapActions {
   open: (sheetId: string | null) => Promise<OpenResult>
@@ -131,6 +135,19 @@ const history = new History()
 // reactive graph (a proxied Timeout is not a Timeout). Matches the module-level
 // timer LocalStorageWatcher uses.
 let saveTimer: ReturnType<typeof setTimeout> | null = null
+
+// Generation ticket for the session. open() and close() both suspend — on the
+// flush, on the read, on the write of a fresh sheet — and the store they come
+// back to is a singleton. Each call takes a ticket up front; a step that
+// resolves holding a stale one has been overtaken by a later open() or close()
+// and must publish nothing. Without it the LAST write wins rather than the
+// last CALL: two opens racing meant whichever read finished last decided which
+// map the store held, and an open still in flight when the overlay unmounted
+// republished a sheet that close() had just dropped.
+//
+// close() already guards itself by sheet id; this is the same idea reaching
+// across the two, so a close can invalidate an open and not only the reverse.
+let sessionGeneration = 0
 
 // The published sheet is replaced, never mutated — the chart store's idiom
 // (MINDMAP_NATIVE_AGENT_BRIEF Lane D). Every edit runs on a draft and
@@ -312,6 +329,11 @@ export const useMindmapStore = defineStore('mindmap', {
       this.publish(draft)
     },
     async open(sheetId: string | null) {
+      // This call's ticket. Checked after every suspension below; see
+      // sessionGeneration.
+      const generation = ++sessionGeneration
+      const overtaken: OpenResult = { ok: false, error: 'A newer open replaced this one', superseded: true }
+
       // Commit whatever write is still pending to the sheet it belongs to
       // before swapping it out — the same rule LocalStorageWatcher's pending
       // write follows, so an edit made just before switching is never lost to
@@ -319,6 +341,9 @@ export const useMindmapStore = defineStore('mindmap', {
       // fires and forgets, but readSheet below would race it — a read that
       // wins returns the pre-edit sheet and the last edit silently vanishes.
       await this.flushSave()
+      if (generation !== sessionGeneration) {
+        return overtaken
+      }
 
       let sheet: Sheet
       let created: boolean
@@ -329,6 +354,9 @@ export const useMindmapStore = defineStore('mindmap', {
       }
       else {
         const result = await readSheetResult(sheetId)
+        if (generation !== sessionGeneration) {
+          return overtaken
+        }
         if (result.kind === 'ok') {
           sheet = result.sheet
           created = false
@@ -347,7 +375,7 @@ export const useMindmapStore = defineStore('mindmap', {
           // the real one sat on disk, unreferenced. Refuse instead, and leave
           // every byte of state alone so nothing has moved on when the caller
           // decides what to say.
-          return { ok: false, error: result.error }
+          return { ok: false, error: result.error, superseded: false }
         }
       }
 
@@ -356,8 +384,15 @@ export const useMindmapStore = defineStore('mindmap', {
       // would show a map that vanishes on the next reload.
       if (created) {
         const write = await writeSheet(sheet.sheetId, sheet)
+        if (generation !== sessionGeneration) {
+          // Overtaken while the fresh sheet was being written. It is on disk
+          // and nothing references it — an orphan the sweep cannot see, since
+          // it collects image blobs and not sheets. Rare enough to accept and
+          // small enough not to chase with a delete that could itself race.
+          return overtaken
+        }
         if (!write.ok) {
-          return { ok: false, error: write.error }
+          return { ok: false, error: write.error, superseded: false }
         }
       }
 
@@ -378,6 +413,10 @@ export const useMindmapStore = defineStore('mindmap', {
       return { ok: true, created, sheetId: sheet.sheetId }
     },
     async close() {
+      // Taking a ticket here is what stops an open() still in flight from
+      // republishing the sheet this close is about to drop — the overlay
+      // unmounts with `void mindmap.close()`, so the two really do overlap.
+      ++sessionGeneration
       // The last edit must survive the overlay closing even if its debounce
       // never fired; flush, then drop the sheet.
       const closingId = this.sheet?.sheetId ?? null

@@ -482,7 +482,7 @@ describe('mindmap store — open refuses rather than blanking', () => {
 
     const result = await store.open('s-real')
 
-    expect(result).toEqual({ ok: false, error: 'Storage is unavailable' })
+    expect(result).toEqual({ ok: false, error: 'Storage is unavailable', superseded: false })
     expect(store.sheet).toBeNull()
     expect(vi.mocked(blankSheet)).not.toHaveBeenCalled()
     expect(vi.mocked(writeSheet)).not.toHaveBeenCalled()
@@ -520,7 +520,7 @@ describe('mindmap store — open refuses rather than blanking', () => {
 
     const result = await store.open(null)
 
-    expect(result).toEqual({ ok: false, error: 'Out of browser storage' })
+    expect(result).toEqual({ ok: false, error: 'Out of browser storage', superseded: false })
     expect(store.sheet).toBeNull()
   })
 
@@ -531,5 +531,84 @@ describe('mindmap store — open refuses rather than blanking', () => {
     const result = await store.open('s-known')
 
     expect(result).toEqual({ ok: true, created: false, sheetId: 's-known' })
+  })
+})
+
+/**
+ * The generation guard. open() suspends on the flush, on the read and on the
+ * write of a fresh sheet, and comes back to a singleton store — so without a
+ * ticket the LAST WRITE wins rather than the last CALL, and an open still in
+ * flight when the overlay unmounts republishes a sheet close() just dropped.
+ */
+describe('mindmap store — open takes a generation ticket', () => {
+  /** A read that resolves only when the test says so. */
+  function deferredRead(sheetId: string, title: string) {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    return {
+      release,
+      result: gate.then(() => ({ kind: 'ok' as const, sheet: makeSheet(sheetId, title) })),
+    }
+  }
+
+  // Lets a pending open() drain its flush and reach the read, so the test
+  // exercises the guard AFTER the read rather than the one right after the
+  // flush — the shallower check would otherwise catch everything first.
+  const reachedTheRead = () => new Promise(resolve => setTimeout(resolve, 0))
+
+  it('the last CALL wins, not the last read to come back', async () => {
+    const slowFirst = deferredRead('s-first', 'First')
+    const fastSecond = deferredRead('s-second', 'Second')
+    vi.mocked(readSheetResult)
+      .mockReturnValueOnce(slowFirst.result)
+      .mockReturnValueOnce(fastSecond.result)
+
+    const store = useMindmapStore()
+    const first = store.open('s-first')
+    await reachedTheRead()
+    const second = store.open('s-second')
+
+    // The SECOND read comes back first; the first one straggles in after.
+    fastSecond.release()
+    await second
+    slowFirst.release()
+    const firstResult = await first
+
+    expect(store.sheet.sheetId).toBe('s-second')
+    expect(firstResult.ok).toBe(false)
+    expect(firstResult.ok === false && firstResult.superseded).toBe(true)
+  })
+
+  it('marks an overtaken open as superseded, not as an error to show', async () => {
+    const slow = deferredRead('s-slow', 'Slow')
+    vi.mocked(readSheetResult).mockReturnValueOnce(slow.result)
+
+    const store = useMindmapStore()
+    const pending = store.open('s-slow')
+    await reachedTheRead()
+    await store.open(null)
+    slow.release()
+    const result = await pending
+
+    // superseded is what tells the overlay to stay quiet; a bare ok:false
+    // would put "could not be opened" on screen over nothing the user did.
+    expect(result).toEqual({ ok: false, error: expect.any(String), superseded: true })
+  })
+
+  it('an open still in flight when close() runs does not republish the sheet', async () => {
+    const slow = deferredRead('s-ghost', 'Ghost')
+    vi.mocked(readSheetResult).mockReturnValueOnce(slow.result)
+
+    const store = useMindmapStore()
+    const pending = store.open('s-ghost')
+    await reachedTheRead()
+    await store.close()
+    slow.release()
+    const result = await pending
+
+    expect(result.ok).toBe(false)
+    expect(store.sheet).toBeNull()
   })
 })

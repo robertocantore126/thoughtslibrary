@@ -288,6 +288,12 @@ onMounted(async () => {
   const result = await mindmap.open(existing ?? null)
 
   if (!result.ok) {
+    // Overtaken by a later open or by a close: another overlay owns the store
+    // now, and this one is on its way out. Saying anything here would put an
+    // error on screen that describes nothing the user did.
+    if (result.superseded) {
+      return
+    }
     // Refused: storage is down, or the record is damaged. The map does not
     // open and — the part that matters — the chart keeps pointing at the sheet
     // it already had. Recording a replacement here is what used to strand the
