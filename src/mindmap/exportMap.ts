@@ -2,6 +2,7 @@ import { inlineStoredImageUrl, isLocalAssetUrl } from '../helpers/assets'
 import { rectOf } from './cull'
 import { edgePath, type Rect } from './geometry'
 import { type NodeSize, TEXT_INSET } from './layout'
+import { resolveNodeFill } from './nodeStyle'
 import {
   arrowheadPath,
   DEFAULT_GROUP_COLOR,
@@ -19,6 +20,7 @@ import {
   relationshipPath,
   relationshipPoints,
 } from './relations'
+import { listIndentPx, paraGapPx } from './richtext'
 import { DEFAULT_GROUP_BORDER_WIDTH, type MindNode, type Sheet, type TextRun } from './types'
 
 /**
@@ -95,14 +97,16 @@ export function sheetBounds(sheet: Sheet, sizes: Record<string, NodeSize>, pad: 
 // paints exactly what the canvas paints.
 // ---------------------------------------------------------------------------
 
-const EDGE_HALO = 'rgba(0, 0, 0, 0.55)'
+// Edges match the live canvas (MindmapEdges' light-theme rules): a dark line
+// on the light map, with a faint halo behind it. The pre-light-theme white
+// line would vanish on the white export background.
+const EDGE_HALO = 'rgba(0, 0, 0, 0.14)'
 const EDGE_HALO_W = 5
-const EDGE_LINE = '#ffffff'
+const EDGE_LINE = 'rgba(0, 0, 0, 0.6)'
 const EDGE_LINE_W = 2
 
 const REL_LINE_W = 2
 
-const NODE_BG = 'rgba(0, 0, 0, 0.62)'
 const NODE_BORDER = 'rgba(255, 255, 255, 0.28)'
 const NODE_BORDER_W = 1
 const NODE_RADIUS = 10
@@ -281,6 +285,7 @@ interface RunStyle {
   underline: boolean
   strike: boolean
   color: string | undefined
+  fontFamily: string | undefined
 }
 
 /** A run's marks as drawn — node-level Style flags join the run's own. */
@@ -293,6 +298,7 @@ function runStyleOf(run: TextRun, node: MindNode): RunStyle {
     underline: !!run.underline || !!s.underline || s.shape === 'underline',
     strike: !!run.strike || !!s.strikethrough,
     color: run.color ?? s.textColor,
+    fontFamily: run.fontFamily,
   }
 }
 
@@ -481,7 +487,7 @@ function boxShape(node: MindNode, h: number): { rx: number, draw: boolean } {
  * title wrapped to the measured width. `images` maps style image URLs to
  * their portable data URIs; the map is the store's `sizes` cache.
  */
-function nodeElement(node: MindNode, size: NodeSize, theme: ExportTheme, images: Map<string, string>, shadowUsed: { value: boolean }): string {
+function nodeElement(node: MindNode, size: NodeSize, theme: ExportTheme, images: Map<string, string>, shadowUsed: { value: boolean }, sheet: Sheet): string {
   const s = node.style
   const pad = s.padding ?? TEXT_INSET
   const parts: string[] = []
@@ -492,7 +498,9 @@ function nodeElement(node: MindNode, size: NodeSize, theme: ExportTheme, images:
 
   const shape = boxShape(node, size.h)
   if (shape.draw) {
-    const fill = s.fill ?? NODE_BG
+    // Same fill rule as the live topic: explicit Style wins, else the r-node
+    // branch palette (root white, branch colours by depth, deep white).
+    const fill = s.fill ?? resolveNodeFill(node, sheet)
     const stroke = s.stroke ?? NODE_BORDER
     const width = s.borderWidth ?? NODE_BORDER_W
     const attrs = [`x="0"`, `y="0"`, `width="${round(size.w)}"`, `height="${round(size.h)}"`, `rx="${round(shape.rx)}"`, `fill="${fill}"`, `stroke="${stroke}"`, `stroke-width="${width}"`]
@@ -527,17 +535,19 @@ function nodeElement(node: MindNode, size: NodeSize, theme: ExportTheme, images:
   const fontFamily = s.fontFamily ?? theme.fontFamily
   const paras = paragraphsOf(node, size.w)
   let cursor = textTop
+  const baseFont = s.fontSize ?? 14
   paras.forEach((para, index) => {
     if (para.paraGap && index > 0) {
-      cursor += (s.fontSize ?? 14) * 0.45
+      cursor += paraGapPx(baseFont)
     }
-    const lineX = textX + para.listIndent * 11
+    const indent = listIndentPx(para.listIndent, baseFont)
+    const lineX = textX + indent
     para.lines.forEach((line, lineIndex) => {
       const baseline = cursor + line.fs * 0.8
       if (para.listIndent > 0 && lineIndex === 0) {
         // The bullet hangs in the margin the paragraph reserves (the CSS
-        // text-indent: -11px), so wrapped lines align under the text.
-        parts.push(`<text x="${round(lineX - 11)}" y="${round(baseline)}" font-size="${line.fs}" fill="${textColor}">•</text>`)
+        // text-indent), so wrapped lines align under the text.
+        parts.push(`<text x="${round(lineX - indent)}" y="${round(baseline)}" font-size="${line.fs}" fill="${textColor}">•</text>`)
       }
       const spans = line.segments.map((seg) => {
         const attrs = [`font-size="${seg.style.fs}"`]
@@ -549,6 +559,9 @@ function nodeElement(node: MindNode, size: NodeSize, theme: ExportTheme, images:
         }
         if (seg.style.underline || seg.style.strike) {
           attrs.push(`text-decoration="${[seg.style.underline ? 'underline' : '', seg.style.strike ? 'line-through' : ''].filter(Boolean).join(' ')}"`)
+        }
+        if (seg.style.fontFamily) {
+          attrs.push(`font-family="${escapeXml(seg.style.fontFamily)}"`)
         }
         const fill = seg.style.color ?? textColor
         if (fill !== textColor) {
@@ -602,8 +615,8 @@ export async function exportSheetSvg(
 ): Promise<string> {
   const resolved = await resolveImages(sheet)
   const fullTheme: ExportTheme = {
-    fontFamily: theme?.fontFamily ?? 'sans-serif',
-    textColor: theme?.textColor ?? '#ffffff',
+    fontFamily: theme?.fontFamily ?? 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+    textColor: theme?.textColor ?? '#141414',
     background: theme?.background ?? '',
   }
 
@@ -615,7 +628,7 @@ export async function exportSheetSvg(
     .filter(n => !hidden.has(n.id))
     .map((n) => {
       const size = sizes[n.id] ?? { w: 84, h: 40 }
-      return nodeElement(n, size, fullTheme, resolved, shadowUsed)
+      return nodeElement(n, size, fullTheme, resolved, shadowUsed, sheet)
     })
 
   if (shadowUsed.value) {

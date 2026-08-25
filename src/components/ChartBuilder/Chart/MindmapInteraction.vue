@@ -134,8 +134,11 @@ function dispatch(command: Command, key: string) {
       }
       const created = store.createChild(parentId)
       if (created) {
-        store.select({ kind: 'node', id: created })
-        store.requestEdit(created)
+        // Tab creates a child but keeps the selection on the parent: the
+        // keyboard path is for fast tree building (Enter/Tab/Typing) where
+        // jumping selection to every fresh child forces a re-aim on the next
+        // keystroke. The "Add child" button and context menu still select and
+        // open the new node, because there they are explicit, single actions.
         relayout()
       }
       break
@@ -334,6 +337,10 @@ let suppressNextClick = false
 
 const DRAG_THRESHOLD = 4
 
+// World units of separation beyond which a main-topic drop counts as "onto
+// empty ground" rather than "onto that nearby branch". See updateDropIndicator.
+const FREE_MAIN_DROP_DISTANCE = 96
+
 function onPointerDown(event: PointerEvent) {
   // Any pointerdown outside an open menu closes it; the menu's own buttons
   // resolve as inside it and leave it alone.
@@ -347,6 +354,19 @@ function onPointerDown(event: PointerEvent) {
   // Text selection inside the rename editor must keep working: a pointerdown
   // on a contenteditable starts no drag (the keymap bails on the same targets).
   if (target.closest?.('[contenteditable], input, textarea')) {
+    return
+  }
+  // A node's resize handles (MindmapNode) own their pointer: the drag system
+  // must not steal a pointerdown meant to grow a box.
+  if (target.closest?.('.mindmap-resize-handle')) {
+    return
+  }
+  // A plain LEFT click on empty ground clears the selection. Panning no longer
+  // claims the left button on the ground (that moved to the right button in
+  // MindmapCanvas), so this is safe to do at pointerdown — there is no drag to
+  // compete with for the same pointer.
+  if (target.closest?.('.mindmap-ground') && !event.shiftKey) {
+    store.clearSelection()
     return
   }
   const nodeEl = target.closest?.('[data-node-id]') as HTMLElement | null
@@ -456,6 +476,21 @@ function updateDropIndicator(event: PointerEvent) {
     dropIndicator.value = null
     return
   }
+  // A main topic — a direct child of the root — dropped on EMPTY ground is not
+  // a reparent (it is already a child of the root), it is a free placement: the
+  // whole point of dragging a main topic is to break it out of the balanced
+  // radial column (§C.4 parity with r-node). So when the nearest topic is far
+  // enough away that "snap onto it" would jerk the pointer, refuse the snap for
+  // a main topic and let the pointerup place it at the pointer's world position
+  // instead (setPosition below). The threshold is generous so a deliberate drop
+  // beside a branch still snaps normally.
+  const isFreeMain = drag.ids.length === 1
+    && sheet.nodes[drag.ids[0]]?.parentId === sheet.rootNodeId
+    && Math.sqrt(best) > FREE_MAIN_DROP_DISTANCE
+  if (isFreeMain) {
+    dropIndicator.value = null
+    return
+  }
   const placement = dropPlacement(sheet, drag.ids, target.id, target.zone)
   dropIndicator.value = placement ? { targetId: target.id, zone: target.zone, ...placement } : null
 }
@@ -470,6 +505,12 @@ function onPointerUp(event: PointerEvent) {
         // the threshold and here built nothing.
         moveNodes(store, drag.ids, placement.parentId, placement.index)
         relayout()
+      }
+      else {
+        // No snap target: the pointer ended on empty ground (a main topic
+        // dropped far from its own branch). That is a free placement, one
+        // `setPosition` op, so undo restores the whole drag in one step.
+        placeFree(drag.ids, drag.nodeId, event.clientX, event.clientY)
       }
       suppressNextClick = true
     }
@@ -491,6 +532,44 @@ function onPointerCancel(event: PointerEvent) {
   }
   if (marquee.active && event.pointerId === marqueePointer) {
     marquee.active = false
+  }
+}
+
+/**
+ * Placed the dragged set freely at a screen point when no node offered a
+ * snap target. The anchor node takes the pointer's world position as its new
+ * centre; every other dragged node keeps its offset from the anchor, so a
+ * branch stays together. Only the nodes that are actually main topics are
+ * freed — dragging a subtree that is not a direct child of the root onto
+ * empty ground still wants a reparent, which this fallback never invents.
+ */
+function placeFree(ids: string[], anchorId: string, clientX: number, clientY: number) {
+  const sheet = store.sheet
+  if (!sheet) {
+    return
+  }
+  const world = screenToWorld(clientX, clientY)
+  const anchorSize = props.sizes[anchorId]
+  const anchor = sheet.nodes[anchorId]
+  if (!anchor || !anchorSize) {
+    return
+  }
+  // The anchor's current top-left, used to keep the group's offsets.
+  const anchorDx = world.x - anchorSize.w / 2 - anchor.position.x
+  const anchorDy = world.y - anchorSize.h / 2 - anchor.position.y
+  let placed = false
+  for (const id of ids) {
+    const node = sheet.nodes[id]
+    // Only main topics get freed; anything else is left for the snap path
+    // next time. A no-op placement (already there) writes nothing.
+    if (!node || node.parentId !== sheet.rootNodeId) {
+      continue
+    }
+    store.setPosition(id, node.position.x + anchorDx, node.position.y + anchorDy)
+    placed = true
+  }
+  if (placed) {
+    relayout()
   }
 }
 
@@ -830,9 +909,10 @@ onUnmounted(() => {
   flex-direction: column;
   min-width: 150px;
   padding: 4px;
-  background: rgba(10, 10, 10, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.18);
   border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
   pointer-events: auto;
   z-index: 3;
 }
@@ -850,7 +930,7 @@ onUnmounted(() => {
 }
 
 .mindmap-context-menu button:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.07);
 }
 
 /* The dragged topics get a transient dim; the class is toggled on their

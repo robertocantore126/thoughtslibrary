@@ -130,6 +130,43 @@ describe('layoutSheet', () => {
     expect(moved.position.x).not.toBe(420)
     expect(moved.position.manual).toBe(false)
   })
+
+  it('never recalculates a hand-moved topic when siblings are created or deleted', () => {
+    const { sheet, sizes } = buildSheet(12)
+    // n1 is a main topic (root child) the user dragged somewhere fixed.
+    const manual = sheet.nodes.n1
+    manual.position = { x: 420, y: -60, manual: true }
+    layoutSheet(sheet, sizes)
+
+    // Sibling CREATED under the root: the manual topic must not move.
+    sheet.nodes.root.childrenIds.push('sib')
+    sheet.nodes.sib = makeNode('sib', 'root', 'New sibling', 'main')
+    sizes.sib = sizeFor('New sibling')
+    layoutSheet(sheet, sizes)
+    expect(manual.position.x).toBe(420)
+    expect(manual.position.y).toBe(-60)
+    expect(manual.position.manual).toBe(true)
+
+    // Sibling DELETED from the root (with its whole subtree, as the app does):
+    // still pinned in place.
+    const removed = sheet.nodes.root.childrenIds.find(id => id !== 'n1' && id !== 'sib')
+    sheet.nodes.root.childrenIds = sheet.nodes.root.childrenIds.filter(id => id !== removed)
+    const removeSubtree = (id: string) => {
+      for (const kid of sheet.nodes[id].childrenIds) {
+        removeSubtree(kid)
+      }
+      delete sheet.nodes[id]
+      delete sizes[id]
+    }
+    if (removed) {
+      removeSubtree(removed)
+    }
+    layoutSheet(sheet, sizes)
+    expect(manual.position.x).toBe(420)
+    expect(manual.position.y).toBe(-60)
+    expect(manual.position.manual).toBe(true)
+    expectNoOverlaps(nodeRects(sheet, sizes))
+  })
 })
 
 describe('layout — copy-on-write', () => {

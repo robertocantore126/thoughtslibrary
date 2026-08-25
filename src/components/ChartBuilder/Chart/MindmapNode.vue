@@ -4,6 +4,7 @@ import type { MindNode, TextRun } from '../../../mindmap/types'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { topicBoxStyle, topicVisualStyle } from '../../../mindmap/nodeStyle'
 import {
+  listIndentPx,
   plainOffsetOf,
   plainPointOf,
   plainToRuns,
@@ -12,6 +13,7 @@ import {
   runsFromHtml,
   runsToPlain,
   runStyle,
+  setRunBackground,
   setRunColor,
   toggleMark,
 } from '../../../mindmap/richtext'
@@ -40,13 +42,27 @@ const store = useMindmapStore()
 
 const isSelected = computed(() => store.isSelected({ kind: 'node', id: props.node.id }))
 
+// Live box size while a resize handle is dragged. Written on every pointermove,
+// committed to the store once on pointerup (see onResizeEnd). Undefined fields
+// mean "follow the natural size", so an untouched axis stays auto.
+const resizeLive = ref<{ w?: number, h?: number }>({})
+// Last target axes from onResizeMove, read at pointerup after resizeLive is
+// cleared. Module scope so the component's reactivity never wraps them.
+let resizeLastW: number | undefined
+let resizeLastH: number | undefined
+
 const nodeStyle = computed(() => ({
   left: `${props.node.position.x}px`,
   top: `${props.node.position.y}px`,
   ...topicBoxStyle(props.node),
   // Visual style is non-box (M2): a fill/opacity change must not re-invalidate
   // measurement, hence it lives apart from topicBoxStyle.
-  ...topicVisualStyle(props.node),
+  ...topicVisualStyle(props.node, store.sheet),
+  // Live resize override: while a resize handle is dragged the box follows the
+  // pointer immediately, but nothing is committed to the store until pointerup,
+  // so the whole gesture is ONE setNodeStyle op (ONE undo entry, §T.2).
+  ...(resizeLive.value.w !== undefined ? { width: `${resizeLive.value.w}px`, maxWidth: 'none' } : {}),
+  ...(resizeLive.value.h !== undefined ? { height: `${resizeLive.value.h}px` } : {}),
 }))
 
 // --- rename in place ------------------------------------------------------
@@ -86,14 +102,15 @@ function currentRuns(): TextRun[] {
  * declaration would misread every pasted document. The walker trusts these
  * two attributes and infers everything else.
  */
-function paintEditor(el: HTMLElement, runs: TextRun[]) {
+function paintEditor(el: HTMLElement, runs: TextRun[], fontSize?: number) {
   el.textContent = ''
+  const fontPx = fontSize ?? 14
   for (const para of runParagraphs(runs)) {
     const line = el.ownerDocument.createElement('div')
     line.className = 'mindmap-editor-para'
     if (para.listIndent > 0) {
       line.dataset.indent = String(para.listIndent)
-      line.style.paddingLeft = `${para.listIndent * 11}px`
+      line.style.paddingLeft = `${listIndentPx(para.listIndent, fontPx)}px`
     }
     for (const run of para.runs) {
       const span = el.ownerDocument.createElement('span')
@@ -155,7 +172,7 @@ async function startEdit(seed = '') {
   }
   // A seed discards the formatting along with the text, which is right: the
   // user typed a character over the whole title and means to replace it.
-  paintEditor(el, seed ? plainToRuns(seed) : currentRuns())
+  paintEditor(el, seed ? plainToRuns(seed) : currentRuns(), props.node.style.fontSize)
   el.focus()
   selectAll(el, !!seed)
   window.dispatchEvent(new CustomEvent(EDIT_OPENED, { detail: { nodeId: props.node.id } }))
@@ -273,7 +290,7 @@ function applyToSelection(edit: (runs: TextRun[], start: number, end: number) =>
     return
   }
   const next = edit(readEditor(), range.start, range.end)
-  paintEditor(el, next)
+  paintEditor(el, next, props.node.style.fontSize)
   restoreOffsets(el, range.start, range.end)
   reportSelection()
 }
@@ -344,6 +361,9 @@ function onFormatRequest(event: Event) {
   const detail = (event as CustomEvent<FormatRequest>).detail
   if (detail.mark) {
     applyToSelection((runs, start, end) => toggleMark(runs, start, end, detail.mark as Mark))
+  }
+  else if (detail.bg !== undefined) {
+    applyToSelection((runs, start, end) => setRunBackground(runs, start, end, detail.bg))
   }
   else {
     applyToSelection((runs, start, end) => setRunColor(runs, start, end, detail.color))
@@ -425,7 +445,7 @@ function onEditorPaste(event: ClipboardEvent) {
   const before = range ? sliceRuns(existing, 0, range.start) : existing
   const after = range ? sliceRuns(existing, range.end, runsToPlain(existing).length) : []
   const next = [...before, ...pasted, ...after]
-  paintEditor(el, next)
+  paintEditor(el, next, props.node.style.fontSize)
 
   const caret = runsToPlain(before).length + runsToPlain(pasted).length
   restoreOffsets(el, caret, caret)
@@ -488,6 +508,187 @@ function onNodeDblclick() {
 function toggleCollapsed() {
   store.toggleCollapse(props.node.id)
 }
+
+// --- node resize (right/bottom/corner handles) -----------------------------
+// Shown on the selected topic; dragging grows the box via node.style.width /
+// height (Style already carries both, and sizeKey re-measures on them). The
+// store is touched ONCE on pointerup, so a drag is one setNodeStyle op =
+// one undo entry; the live follow is purely local CSS, above.
+
+interface ResizeState {
+  pointerId: number
+  edges: 'e' | 's' | 'se'
+  baseW: number
+  baseH: number
+  startX: number
+  startY: number
+}
+
+let resizeState: ResizeState | null = null
+
+function onResizeStart(edges: ResizeState['edges'], event: PointerEvent) {
+  const el = (event.currentTarget as HTMLElement).closest('.mindmap-node') as HTMLElement | null
+  if (!el) {
+    return
+  }
+  // Anchor on a manual width/height if one is set, else the box's natural size.
+  const baseW = props.node.style.width ?? el.offsetWidth
+  const baseH = props.node.style.height ?? el.offsetHeight
+  event.preventDefault()
+  event.stopPropagation()
+  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
+  resizeState = {
+    pointerId: event.pointerId,
+    edges,
+    baseW,
+    baseH,
+    startX: event.clientX,
+    startY: event.clientY,
+  }
+  window.addEventListener('pointermove', onResizeMove, { capture: true })
+  window.addEventListener('pointerup', onResizeEnd, { capture: true })
+}
+
+function onResizeMove(event: PointerEvent) {
+  const s = resizeState
+  if (!s || event.pointerId !== s.pointerId) {
+    return
+  }
+  const dx = (event.clientX - s.startX) / store.camera.scale
+  const dy = (event.clientY - s.startY) / store.camera.scale
+  const next: { w?: number, h?: number } = {}
+  if (s.edges === 'e' || s.edges === 'se') {
+    next.w = Math.max(40, Math.round(s.baseW + dx))
+  }
+  if (s.edges === 's' || s.edges === 'se') {
+    next.h = Math.max(24, Math.round(s.baseH + dy))
+  }
+  // Stash the target axes for the pointerup commit, then show them live. The
+  // stash lives out of the reactive object so resetting it for the next drag
+  // cannot race the commit.
+  if (next.w !== undefined) {
+    resizeLastW = next.w
+  }
+  if (next.h !== undefined) {
+    resizeLastH = next.h
+  }
+  resizeLive.value = next
+}
+
+function onResizeEnd(event: PointerEvent) {
+  const s = resizeState
+  if (!s || event.pointerId !== s.pointerId) {
+    return
+  }
+  resizeState = null
+  window.removeEventListener('pointermove', onResizeMove, { capture: true })
+  window.removeEventListener('pointerup', onResizeEnd, { capture: true })
+  resizeLive.value = {}
+  // Commit the final size once, only on the axes this handle touched, and only
+  // when the value actually changed — so a click-and-release on a handle is a
+  // no-op and leaves no undo entry behind.
+  const patch: Partial<MindNode['style']> = {}
+  if ((s.edges === 'e' || s.edges === 'se') && resizeLastW !== undefined && resizeLastW !== props.node.style.width) {
+    patch.width = resizeLastW
+  }
+  if ((s.edges === 's' || s.edges === 'se') && resizeLastH !== undefined && resizeLastH !== props.node.style.height) {
+    patch.height = resizeLastH
+  }
+  resizeLastW = undefined
+  resizeLastH = undefined
+  if (Object.keys(patch).length > 0) {
+    store.setNodeStyle(props.node.id, patch)
+  }
+}
+
+// --- image resize (bottom-right handle on the topic's image) ---------------
+// The image box is imageWidth × imageWidth·imageAspect (nodeStyle
+// topicImageBoxStyle), so dragging the handle changes imageWidth ONLY — the
+// aspect is fixed and the height follows. One setNodeStyle op on pointerup =
+// one undo entry; the live follow is a local imageWidth override passed to
+// MindmapTopicContent (never to the measure layer), exactly like the node
+// resize handles.
+
+interface ImageResizeState {
+  pointerId: number
+  baseW: number
+  startX: number
+  startY: number
+}
+
+const hasImage = computed(() => !!props.node.style.image)
+let imageResizeState: ImageResizeState | null = null
+let imageResizeLast: number | undefined
+const imageResizeLive = ref<number | undefined>(undefined)
+
+/** Where the handle sits: the image box's bottom-right corner, inside the topic's padding. */
+const imageHandlePos = computed(() => {
+  if (!hasImage.value) {
+    return undefined
+  }
+  const s = props.node.style
+  const w = Math.max(1, Math.round(imageResizeLive.value ?? s.imageWidth ?? 120))
+  const h = Math.max(1, Math.round(w * (s.imageAspect ?? 0.75)))
+  const pad = s.padding ?? 6
+  return { left: `${pad + w}px`, top: `${pad + h}px` }
+})
+
+function onImageResizeStart(event: PointerEvent) {
+  if (!hasImage.value) {
+    return
+  }
+  event.preventDefault()
+  event.stopPropagation()
+  const s = props.node.style
+  imageResizeState = {
+    pointerId: event.pointerId,
+    baseW: s.imageWidth ?? 120,
+    startX: event.clientX,
+    startY: event.clientY,
+  }
+  // Listeners first: a hostile host (or a synthetic pointer) can make
+  // setPointerCapture throw, and that must not abort the drag after the state
+  // is armed — the capture is a nicety, not the mechanism.
+  window.addEventListener('pointermove', onImageResizeMove, { capture: true })
+  window.addEventListener('pointerup', onImageResizeEnd, { capture: true })
+  try {
+    ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
+  }
+  catch {
+    // No real pointer is active (synthetic events): rely on window capture.
+  }
+}
+
+function onImageResizeMove(event: PointerEvent) {
+  const s = imageResizeState
+  if (!s || event.pointerId !== s.pointerId) {
+    return
+  }
+  // World units: the node box (and the image inside it) lives under the world
+  // transform, so a screen delta divides by the camera scale like the topic
+  // resize handles above.
+  const dx = (event.clientX - s.startX) / store.camera.scale
+  const next = Math.max(24, Math.round(s.baseW + dx))
+  imageResizeLast = next
+  imageResizeLive.value = next
+}
+
+function onImageResizeEnd(event: PointerEvent) {
+  const s = imageResizeState
+  if (!s || event.pointerId !== s.pointerId) {
+    return
+  }
+  imageResizeState = null
+  window.removeEventListener('pointermove', onImageResizeMove, { capture: true })
+  window.removeEventListener('pointerup', onImageResizeEnd, { capture: true })
+  imageResizeLive.value = undefined
+  const last = imageResizeLast
+  imageResizeLast = undefined
+  // A click-and-release is a no-op (no undo entry); only a real change commits.
+  if (last !== undefined && last !== props.node.style.imageWidth) {
+    store.setNodeStyle(props.node.id, { imageWidth: last })
+  }
+}
 </script>
 
 <template>
@@ -499,7 +700,7 @@ function toggleCollapsed() {
     @click="onNodeClick"
     @dblclick="onNodeDblclick"
   >
-    <MindmapTopicContent :node="props.node" :hide-title="editing" />
+    <MindmapTopicContent :node="props.node" :hide-title="editing" :image-width="imageResizeLive" />
     <div
       v-if="editing"
       ref="editor"
@@ -521,6 +722,42 @@ function toggleCollapsed() {
     >
       {{ props.node.collapsed ? '+' : '-' }}
     </button>
+    <!-- Resize handles: shown on the selected topic (hidden while its
+    editor is open), one on each alterable side plus the corner. Each owns its
+    pointer, so MindmapInteraction's drag delegation skips them (it checks
+    .mindmap-resize-handle). They grow node.style.width/height. -->
+    <span
+      v-if="isSelected && !editing"
+      class="mindmap-resize-handle"
+      data-edge="e"
+      title="Drag to resize width"
+      @pointerdown.stop.prevent="onResizeStart('e', $event)"
+    />
+    <span
+      v-if="isSelected && !editing"
+      class="mindmap-resize-handle"
+      data-edge="s"
+      title="Drag to resize height"
+      @pointerdown.stop.prevent="onResizeStart('s', $event)"
+    />
+    <span
+      v-if="isSelected && !editing"
+      class="mindmap-resize-handle"
+      data-edge="se"
+      title="Drag to resize"
+      @pointerdown.stop.prevent="onResizeStart('se', $event)"
+    />
+    <!-- Image resize handle: bottom-right corner of the topic's image, only on
+    a selected topic that HAS an image (r-node parity — the image is resized
+    by a handle, keeping its aspect). Shares .mindmap-resize-handle so
+    MindmapInteraction's drag delegation skips it like the box handles. -->
+    <span
+      v-if="isSelected && !editing && hasImage"
+      class="mindmap-resize-handle mindmap-image-handle"
+      title="Drag to resize the image"
+      :style="imageHandlePos"
+      @pointerdown.stop.prevent="onImageResizeStart($event)"
+    />
   </div>
 </template>
 
@@ -570,16 +807,59 @@ function toggleCollapsed() {
   justify-content: center;
   padding: 0;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  background: rgba(0, 0, 0, 0.78);
-  color: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .mindmap-node-toggle.collapsed {
   border-color: #ff7f50;
   color: #ff7f50;
+}
+
+/* Resize handles on a selected topic. Positioned on the box's edges/corner,
+   past the border so they stay grabbable at any zoom (world units, inside the
+   transformed world). The same accent as the selection outline. */
+.mindmap-resize-handle {
+  position: absolute;
+  z-index: 3;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: #f5f5f5;
+  border: 1.5px solid #ff7f50;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.mindmap-resize-handle[data-edge='e'] {
+  right: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  cursor: ew-resize;
+}
+
+.mindmap-resize-handle[data-edge='s'] {
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  cursor: ns-resize;
+}
+
+.mindmap-resize-handle[data-edge='se'] {
+  right: -6px;
+  bottom: -6px;
+  cursor: nwse-resize;
+}
+
+/* The image resize handle is positioned INLINE at the image box's
+   bottom-right corner (imageHandlePos), centred on it. */
+.mindmap-resize-handle.mindmap-image-handle {
+  transform: translate(-50%, -50%);
+  cursor: nwse-resize;
+  z-index: 4;
 }
 </style>

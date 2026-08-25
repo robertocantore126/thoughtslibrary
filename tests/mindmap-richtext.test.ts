@@ -7,9 +7,12 @@ import {
   plainOffsetOf,
   plainPointOf,
   plainToRuns,
+  runParagraphs,
   runsFromDom,
   runsFromHtml,
   runsToPlain,
+  runStyle,
+  setRunBackground,
   setRunColor,
   setRunFontSize,
   toggleMark,
@@ -26,8 +29,8 @@ import {
  * parser behind `DOMParser` is substituted, exactly as `fake-indexeddb`
  * substitutes for IndexedDB in tests/mindmap-storage.test.ts.
  *
- * domino arrives as a dependency of turndown rather than a direct one. See
- * the final report: it should be named explicitly in package.json.
+ * domino is declared as a direct devDependency in package.json (it was
+ * previously only reachable transitively through turndown).
  */
 beforeAll(() => {
   class NodeDomParser {
@@ -305,11 +308,12 @@ describe('runsFromHtml — Google Docs', () => {
   })
 
   it('drops the layout markup while keeping the text', () => {
-    // font-family, background-color, vertical-align, white-space and
-    // line-height are page layout; none has a home on a TextRun. Asserted as
-    // an exact key set rather than a few absences, because the failure being
-    // guarded against is a NEW field leaking through, which no blocklist of
-    // known-bad names would catch.
+    // vertical-align, white-space and line-height are page layout; none has a
+    // home on a TextRun and they must NOT leak. font-family and
+    // background-color are carried deliberately (the r-node parity work), so
+    // they are allowed. Asserted as an exact key set rather than a few
+    // absences, because the failure being guarded against is a NEW field
+    // leaking through, which no blocklist of known-bad names would catch.
     const allowed = new Set([
       'text',
       'bold',
@@ -317,6 +321,8 @@ describe('runsFromHtml — Google Docs', () => {
       'underline',
       'strike',
       'color',
+      'fontFamily',
+      'backgroundColor',
       'fontSize',
       'paraGap',
       'listIndent',
@@ -358,11 +364,14 @@ describe('runsFromHtml — Microsoft Word', () => {
 })
 
 describe('runsFromHtml — structure', () => {
-  it('maps headings to the fixed size table, not the source px', () => {
+  it('renders a heading as BOLD at the body size, r-node style', () => {
+    // r-node stores an h1 as bold at the topic's font-size with no per-run
+    // size bump, so pasting one must not inflate the node. The source's 96px
+    // is deliberately NOT carried either.
     const runs = runsFromHtml('<h1 style="font-size:96px">Title</h1>')
     expect(runs).toHaveLength(1)
-    expect(runs[0].fontSize).toBe(28)
-    expect(runs[0].fontSize).not.toBe(96)
+    expect(runs[0].bold).toBe(true)
+    expect(runs[0].fontSize).toBeUndefined()
   })
 
   it('gives <li> a listIndent at its nesting depth', () => {
@@ -550,5 +559,90 @@ describe('runsFromHtml — the paste cap', () => {
   it('returns an empty array for an empty payload', () => {
     expect(runsFromHtml('')).toEqual([])
     expect(runsFromHtml('   ')).toEqual([])
+  })
+})
+
+describe('background highlight (advanced rich text)', () => {
+  it('parses background-color from pasted html', () => {
+    const runs = runsFromHtml('<p>a <mark style="background-color:#fde68a">note</mark> inside</p>')
+    const note = runs.find(r => !!r.backgroundColor)
+    expect(note?.backgroundColor).toBe('#fde68a')
+    expect(note?.text).toBe('note')
+    expectInvariant(runs, runsToPlain(runs))
+  })
+
+  it('setRunBackground highlights a range and round-trips through the editor', () => {
+    const runs = plainToRuns('one two three')
+    const highlighted = setRunBackground(runs, 4, 7, '#a7f3d0')
+    const run = highlighted.find(r => !!r.backgroundColor)
+    expect(run?.backgroundColor).toBe('#a7f3d0')
+    expect(run?.text).toBe('two')
+    // Cleared highlight merges back to the invariant.
+    const cleared = setRunBackground(highlighted, 4, 7, undefined)
+    expect(cleared.every(r => !r.backgroundColor)).toBe(true)
+    expectInvariant(cleared, runsToPlain(cleared))
+  })
+})
+
+describe('r-node rich text parity', () => {
+  it('reads the background SHORTHAND, not only background-color', () => {
+    // Word/Docs spell it longhand, but editors, signatures and Draw.io exports
+    // hand-roll `background:#fcdcd2`, and r-node keeps both.
+    const runs = runsFromHtml('<p>a <span style="background:#ffd166">note</span> inside</p>')
+    const note = runs.find(r => !!r.backgroundColor)
+    expect(note?.backgroundColor).toBe('#ffd166')
+    expect(note?.text).toBe('note')
+    expectInvariant(runs, runsToPlain(runs))
+  })
+
+  it('clears a parent highlight with background-color:transparent', () => {
+    const runs = runsFromHtml('<div style="background:#fcdcd2"><span style="background-color:transparent">in</span></div>')
+    expect(runs.every(r => !r.backgroundColor)).toBe(true)
+  })
+
+  it('fills the whole block instead of per-run strips (r-node parity)', () => {
+    // A block's background is carried on the paragraph-opening run (not as
+    // per-glyph wallpaper on every run), so the topic paints ONE filled box
+    // behind the text — which is what makes a pasted section look contiguous
+    // instead of patchy, exactly as r-node draws it.
+    const runs = runsFromHtml(
+      '<div style="background-color:#fcdcd2; padding:10px"><h3>Title</h3><p>body <b>bold</b></p></div>',
+    )
+    // No run gets a per-glyph strip from the block fill.
+    expect(runs.every(r => !r.backgroundColor)).toBe(true)
+    // Every paragraph carries the fill + the block's padding.
+    const paragraphs = runParagraphs(runs)
+    expect(paragraphs.length).toBeGreaterThan(1)
+    expect(paragraphs.every(p => p.blockBackground === '#fcdcd2')).toBe(true)
+    expect(paragraphs.every(p => p.blockPadding === 10)).toBe(true)
+    expectInvariant(runs, runsToPlain(runs))
+  })
+
+  it('keeps an inline highlight distinct from a block fill', () => {
+    const runs = runsFromHtml(
+      '<div style="background-color:#fcdcd2; padding:8px"><p>a <mark style="background-color:#ffd166">w</mark> b</p></div>',
+    )
+    const highlight = runs.find(r => r.backgroundColor === '#ffd166')
+    expect(highlight?.text).toBe('w')
+    // The block fill is still the paragraph's, not stamped onto the span.
+    expect(runParagraphs(runs).every(p => p.blockBackground === '#fcdcd2')).toBe(true)
+  })
+
+  it('keeps a font-family on the run that declares it and lets siblings differ', () => {
+    const runs = runsFromHtml(
+      '<div style="font-family:Georgia,serif"><h3 style="font-family:Arial">H</h3><p>plain body keeps Georgia</p></div>',
+    )
+    const heading = runs.find(r => r.text === 'H')
+    const body = runs.find(r => (r.text as string).includes('plain body')) as { fontFamily?: string }
+    expect(heading?.fontFamily).toBe('Arial')
+    expect(body.fontFamily).toBe('Georgia,serif')
+    expectInvariant(runs, runsToPlain(runs))
+  })
+
+  it('runStyle emits font-family and background-color for the renderers', () => {
+    const style = runStyle({ text: 'x', fontFamily: 'Cambria', backgroundColor: '#fde68a' })
+    expect(style.fontFamily).toBe('Cambria')
+    expect(style.backgroundColor).toBe('#fde68a')
+    expect(style.padding).toBe('0 1px')
   })
 })

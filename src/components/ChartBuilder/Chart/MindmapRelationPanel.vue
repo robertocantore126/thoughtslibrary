@@ -310,12 +310,13 @@ async function exportMap(kind: 'png' | 'svg') {
   left: 12px;
   z-index: 5;
   width: 224px;
-  background: rgba(10, 10, 10, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.15);
   border-radius: 8px;
   padding: 8px 10px;
   color: inherit;
   font-size: 12.5px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
 
 .relpanel-section {
@@ -323,7 +324,7 @@ async function exportMap(kind: 'png' | 'svg') {
   flex-direction: column;
   gap: 6px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid rgba(0, 0, 0, 0.09);
 }
 
 .relpanel-section:first-of-type {
@@ -349,8 +350,8 @@ async function exportMap(kind: 'png' | 'svg') {
 .relpanel-btn {
   appearance: none;
   flex: 1;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.05);
   color: inherit;
   border-radius: 4px;
   padding: 4px 6px;
@@ -359,7 +360,7 @@ async function exportMap(kind: 'png' | 'svg') {
 }
 
 .relpanel-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.1);
 }
 
 .relpanel-btn:disabled {
@@ -371,8 +372,8 @@ async function exportMap(kind: 'png' | 'svg') {
 .relpanel-num,
 .relpanel-row select {
   width: 96px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(0, 0, 0, 0.2);
   color: inherit;
   border-radius: 4px;
   padding: 3px 5px;
@@ -382,7 +383,7 @@ async function exportMap(kind: 'png' | 'svg') {
   width: 34px;
   height: 24px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid rgba(0, 0, 0, 0.25);
   border-radius: 4px;
   background: transparent;
   cursor: pointer;

@@ -263,8 +263,20 @@ export interface TextRun {
   underline?: boolean
   /** CSS color; when absent the node/theme text color is used. */
   color?: string
+  /** CSS background / highlight behind the run's glyphs (inline highlight). */
+  backgroundColor?: string
+  /** A CSS `font-family` stack, verbatim from the source. Absent = inherit. */
+  fontFamily?: string
   /** Per-run font size in px (headings). Absent = node font size. */
   fontSize?: number
+  /**
+   * A background that fills the WHOLE paragraph block rather than just the
+   * run's glyphs, plus the block's padding. Carried only on the
+   * paragraph-opening run; `runParagraphs` lifts them onto `RunParagraph` and
+   * the topic paints a filled rectangle behind the text (r-node parity).
+   */
+  blockBackground?: string
+  blockPadding?: number
   /** Extra vertical gap before this run's paragraph (past a block boundary). */
   paraGap?: boolean
   /** >0 → this run starts a bullet-list item at this depth (1 = top level). */

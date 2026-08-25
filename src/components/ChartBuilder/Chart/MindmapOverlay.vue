@@ -24,13 +24,32 @@ const hostItemId = computed(() => {
   return store.chart.coordinates?.[tileKey.value]?.id
 })
 
-// Inherit the chart's own font and text colour so the map looks like the
-// chart it lives in — the main thing a native build buys over embedding a
-// canvas renderer (Lane E).
-const overlayStyle = computed(() => ({
-  fontFamily: store.chart.font || 'monospace',
-  color: store.chart.textColor || '#ffffff',
-}))
+// Inherit the chart's own font so the map reads as part of the chart, but the
+// mindmap is a deliberate LIGHT workspace (white backdrop, dark text — the
+// opposite of the chart's dark grid), so text colour is pinned to near-black
+// rather than inherited from the chart palette. Node fills with no explicit
+// textColor inherit this.
+//
+// The DEFAULT face is r-node's own stack (`system-ui, -apple-system,
+// "Segoe UI", Roboto, sans-serif`) rather than the chart's monospace fallback:
+// a pasted paragraph must read the same here as it does in r-node. And the
+// chart's text-shadow (a dark-grid affordance) must NOT reach the light map,
+// where r-node draws no shadow behind the letters.
+const RNODE_FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+// The chart's own default face is monospace (store DEFAULT_CHART.font); it is
+// the "nothing chosen" sentinel, and on the map it makes a pasted paragraph
+// read like a terminal. Treat it as unset so the map defaults to r-node's
+// face; an explicitly chosen chart font still flows through.
+const CHART_DEFAULT_FONT = 'monospace'
+
+const overlayStyle = computed(() => {
+  const chartFont = store.chart.font
+  return {
+    fontFamily: chartFont && chartFont !== CHART_DEFAULT_FONT ? chartFont : RNODE_FONT_STACK,
+    color: '#141414',
+    textShadow: 'none',
+  }
+})
 
 const bodyRef = ref<HTMLElement | null>(null)
 
@@ -113,7 +132,8 @@ const selectedNode = computed(() => {
 // to the shared translucent box seen in the map. These are just the swatch
 // stand-ins for a colour that has not been set (inspectable, not persisted).
 const CHART_BG = '#161616'
-const CHART_TEXT = store.chart.textColor || '#ffffff'
+// Mindmap text default on the light workspace: near-black, matching overlayStyle.
+const CHART_TEXT = '#141414'
 
 function applyStyle(field: string, value: unknown) {
   const node = selectedNode.value
@@ -545,8 +565,8 @@ onUnmounted(() => {
           <div class="inspector-row">
             <label>Img width</label>
             <input
-              class="inspector-num"
-              type="number"
+              class="inspector-range"
+              type="range"
               min="24"
               max="480"
               step="8"
@@ -554,6 +574,7 @@ onUnmounted(() => {
               :value="selectedNode.style.imageWidth ?? defaultImageWidth"
               @change="applyStyle('imageWidth', Number(($event.target as HTMLInputElement).value))"
             >
+            <span class="inspector-slider-value">{{ selectedNode.style.imageWidth ?? defaultImageWidth }}</span>
           </div>
           <p v-if="imageError" class="inspector-image-error" role="alert">
             {{ imageError }}
@@ -579,14 +600,23 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
-/* Near-opaque, NOT the 45% wash focus mode uses. That wash exists because
-   related-layer tiles line up with the grid cells beneath them; a mindmap
-   pans and zooms freely, so a half-visible grid behind it lines up with
-   nothing and reads as a rendering bug (Lane F). */
+/* Near-opaque white: the light workspace the mindmap lives in. Covers the
+   dark chart grid fully so nothing behind it lines up misleadingly.
+
+   A VERY soft 40px hairline grid rides on top (r-node draws a similar faint
+   grid in its light theme): the lines sit just above the perception threshold
+   so the eye has a reference to track while panning, without the strain of an
+   empty white void. The base is a hair's-breadth warmer than white — a faint
+   caramel cream — so the workspace never glares; the grid picks up the same
+   warm hue so nothing reads cool against it. */
 .mindmap-overlay-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(5, 5, 5, 0.95);
+  background-color: rgba(250, 246, 240, 1);
+  background-image:
+    linear-gradient(rgba(140, 100, 60, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(140, 100, 60, 0.05) 1px, transparent 1px);
+  background-size: 40px 40px;
 }
 
 .mindmap-overlay-chrome {
@@ -624,8 +654,8 @@ onUnmounted(() => {
 
 .mindmap-toolbar-actions button {
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.05);
   color: inherit;
   border-radius: 5px;
   padding: 5px 10px;
@@ -634,7 +664,7 @@ onUnmounted(() => {
 }
 
 .mindmap-toolbar-actions button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.1);
 }
 
 .mindmap-toolbar-actions button:disabled {
@@ -661,12 +691,13 @@ onUnmounted(() => {
   max-height: calc(100% - 20px);
   overflow: auto;
   z-index: 5;
-  background: rgba(10, 10, 10, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.15);
   border-radius: 8px;
   padding: 10px;
   color: inherit;
   font-size: 12.5px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
 
 .mindmap-inspector-head {
@@ -693,7 +724,7 @@ onUnmounted(() => {
 
 .inspector-section {
   padding: 6px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid rgba(0, 0, 0, 0.09);
 }
 
 .inspector-section:first-of-type {
@@ -717,7 +748,7 @@ onUnmounted(() => {
   width: 34px;
   height: 24px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid rgba(0, 0, 0, 0.25);
   border-radius: 4px;
   background: transparent;
   cursor: pointer;
@@ -726,8 +757,8 @@ onUnmounted(() => {
 .inspector-num,
 .inspector-row select {
   width: 74px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(0, 0, 0, 0.2);
   color: inherit;
   border-radius: 4px;
   padding: 3px 5px;
@@ -735,6 +766,12 @@ onUnmounted(() => {
 
 .inspector-range {
   flex: 1;
+}
+
+.inspector-slider-value {
+  min-width: 26px;
+  text-align: right;
+  opacity: 0.8;
 }
 
 .inspector-reset {
@@ -771,8 +808,8 @@ onUnmounted(() => {
 .inspector-image-btn {
   flex: 1;
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.05);
   color: inherit;
   border-radius: 4px;
   padding: 3px 5px;
@@ -781,7 +818,7 @@ onUnmounted(() => {
 }
 
 .inspector-image-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.1);
 }
 
 /* The picker itself is never visible; the Add…/Replace… button drives it. */

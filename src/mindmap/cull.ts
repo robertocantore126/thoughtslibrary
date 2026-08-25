@@ -136,6 +136,11 @@ export function sizeKey(node: MindNode): string {
     padding: s.padding,
     shape: s.shape,
     fontFamily: s.fontFamily,
+    // Manual box override (inspector/node-resize): when set, width/height win
+    // over the natural wrap, so changing either must drop the node back into
+    // the measure layer — otherwise the box stays at the auto-laid-out size.
+    width: s.width,
+    height: s.height,
     // Image fields (S3 C.2b): the topic box includes the image slot, whose
     // size is imageWidth × imageAspect — so a resize re-measures, and adding
     // or removing the image changes the key even when width/aspect keep

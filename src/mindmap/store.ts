@@ -67,6 +67,13 @@ export interface MindmapActions {
   rename: (nodeId: string, title: string, runs?: TextRun[]) => void
   remove: (nodeId: string) => void
   toggleCollapse: (nodeId: string) => void
+  /**
+   * Fixes a node's absolute position in world units and marks it manual, so
+   * layout flows around it (position.manual is the engine's promise: only an
+   * explicit auto-layout clears it). One `setPosition` op, so Ctrl+Z undoes a
+   * manual placement like any other edit.
+   */
+  setPosition: (nodeId: string, x: number, y: number) => void
   setNodeStyle: (nodeId: string, patch: Partial<Style>) => void
   clearNodeStyle: (nodeId: string, fields: (keyof Style)[]) => void
   select: (ref: SelRef | null, mode?: 'replace' | 'toggle') => void
@@ -440,6 +447,25 @@ export const useMindmapStore = defineStore('mindmap', {
         return
       }
       this.commit([makeOp('setCollapsed', { id: nodeId, collapsed: !node.collapsed, prev: node.collapsed })])
+    },
+    setPosition(nodeId: string, x: number, y: number) {
+      const sheet = this.sheet
+      const node = sheet?.nodes[nodeId]
+      if (!sheet || !node) {
+        return
+      }
+      // No-op when the node is already exactly there (and already manual): a
+      // drag that lands where it started must not leave an undo entry behind.
+      if (node.position.manual && node.position.x === x && node.position.y === y) {
+        return
+      }
+      this.commit([makeOp('setPosition', {
+        id: nodeId,
+        x,
+        y,
+        manual: true,
+        prev: node.position,
+      })])
     },
     // Style edits are ops, not mutations (S2 M3 trap 5): a field merged into a
     // fresh style object and committed through `setStyle` — whose PREV is the

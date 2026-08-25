@@ -169,13 +169,13 @@ const bounds = computed<Rect>(() => {
 
 .mindmap-edge-halo {
   fill: none;
-  stroke: rgba(0, 0, 0, 0.55);
+  stroke: rgba(0, 0, 0, 0.14);
   stroke-width: 5;
 }
 
 .mindmap-edge-line {
   fill: none;
-  stroke: #ffffff;
+  stroke: rgba(0, 0, 0, 0.6);
   stroke-width: 2;
 }
 </style>

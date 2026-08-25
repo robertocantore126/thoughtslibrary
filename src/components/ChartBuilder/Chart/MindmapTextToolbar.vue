@@ -31,10 +31,12 @@ export interface SelectionMarks {
   strike: boolean
 }
 
-/** Exactly one of the two is set: a mark to toggle, or a colour to apply. */
+/** Exactly one of the fields is set: a mark to toggle, a text colour, or a
+ * background (highlight). */
 export interface FormatRequest {
   mark?: 'bold' | 'italic' | 'underline' | 'strike'
   color?: string
+  bg?: string
 }
 </script>
 
@@ -101,6 +103,9 @@ function onButtonDown(event: MouseEvent, detail: FormatRequest) {
 }
 
 const SWATCHES = ['#ffffff', '#ff7f50', '#ffd166', '#4cc9f0', '#8ac926', '#ef476f']
+// Highlight colours: stronger than a text swatch because they sit BEHIND the
+// glyphs, and on the light map a pastel reads where a saturated hex would not.
+const HIGHLIGHTS = ['#fde68a', '#a7f3d0', '#bae6fd', '#fecaca']
 </script>
 
 <template>
@@ -149,6 +154,23 @@ const SWATCHES = ['#ffffff', '#ff7f50', '#ffd166', '#4cc9f0', '#8ac926', '#ef476
     >
       x
     </button>
+    <span class="separator" />
+    <span class="toolbar-group-title">HL</span>
+    <button
+      v-for="hl in HIGHLIGHTS"
+      :key="hl"
+      class="swatch"
+      :style="{ background: hl, boxShadow: '0 0 0 1px rgba(0,0,0,0.25) inset' }"
+      :title="`Highlight ${hl}`"
+      @mousedown="onButtonDown($event, { bg: hl })"
+    />
+    <button
+      class="swatch clear"
+      title="Clear highlight"
+      @mousedown="onButtonDown($event, { bg: undefined })"
+    >
+      x
+    </button>
   </div>
 </template>
 
@@ -165,9 +187,9 @@ const SWATCHES = ['#ffffff', '#ff7f50', '#ffd166', '#4cc9f0', '#8ac926', '#ef476
   gap: 3px;
   padding: 4px 6px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: rgba(18, 18, 20, 0.94);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
   z-index: 6;
   white-space: nowrap;
 }
@@ -179,26 +201,26 @@ const SWATCHES = ['#ffffff', '#ff7f50', '#ffd166', '#4cc9f0', '#8ac926', '#ef476
   border-radius: 5px;
   border: 1px solid transparent;
   background: transparent;
-  color: #ffffff;
+  color: #111111;
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
 }
 
 .mindmap-text-toolbar button:hover {
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.07);
 }
 
 .mindmap-text-toolbar button.active {
   border-color: #ff7f50;
-  color: #ff7f50;
+  color: #e0612d;
 }
 
 .separator {
   width: 1px;
   height: 16px;
   margin: 0 3px;
-  background: rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.2);
 }
 
 .mindmap-text-toolbar button.swatch {
@@ -207,7 +229,14 @@ const SWATCHES = ['#ffffff', '#ff7f50', '#ffd166', '#4cc9f0', '#8ac926', '#ef476
   height: 16px;
   padding: 0;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  border: 1px solid rgba(0, 0, 0, 0.3);
+}
+
+.toolbar-group-title {
+  font-size: 10px;
+  opacity: 0.6;
+  font-weight: 600;
+  padding: 0 1px;
 }
 
 .mindmap-text-toolbar button.swatch.clear {

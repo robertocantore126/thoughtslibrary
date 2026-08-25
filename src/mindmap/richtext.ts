@@ -34,9 +34,6 @@ export type Mark = 'bold' | 'italic' | 'underline' | 'strike'
  */
 export const MAX_PASTE_CHARS = 2000
 
-/** Heading sizes in px, by `<h1>`–`<h6>` level. */
-const HEADING_SIZES = [28, 24, 20, 18, 16, 15]
-
 /** `font-weight` at or above this is bold, matching the CSS keyword `bold`. */
 const BOLD_WEIGHT = 600
 
@@ -89,8 +86,77 @@ interface Marks {
   underline?: boolean
   strike?: boolean
   color?: string
+  /** Inline (per-run) highlight, e.g. a `<mark>` or a highlighted `<span>`. */
+  backgroundColor?: string
+  /** The current block's fill, painted behind the whole paragraph. */
+  blockBackground?: string
+  /** Padding of the highlighted block, in px. */
+  blockPadding?: number
+  fontFamily?: string
   fontSize?: number
   listIndent?: number
+}
+/**
+ * The background colour of an element, from either spelling a stylesheet or
+ * an author hand-rolls. Word and Google Docs emit `background-color`, but
+ * half the HTML pasted out of editors, email signatures and Draw.io exports
+ * uses the `background` shorthand — `background:#fcdcd2`. Reading only the
+ * longhand silently drops every one of those, so when the longhand is absent
+ * the shorthand is consulted. A colour is anything that is not `transparent`
+ * and is one of the self-describing forms (`#rrggbb`, `rgb()`, `rgba()`) —
+ * matching a `url(...)` or a gradient with a regex-free allow-list keeps the
+ * reader closed: a value we cannot render is safer dropped than half-surfaced.
+ */
+/**
+ * The RESOLVED background of an element. `undefined` means the element made
+ * no background declaration at all (so children keep whatever their parent
+ * inherited); `{ clear: true }` means it explicitly asked for no background
+ * (`transparent`), which must CANCEL a parent's highlight; `{ color }` is a
+ * concrete fill.
+ */
+type BackgroundResult = { clear: true } | { color: string } | undefined
+
+function readBackground(style: Record<string, string>): BackgroundResult {
+  const longhand = style['background-color']
+  if (longhand !== undefined) {
+    return /^transparent$/i.test(longhand.trim()) ? { clear: true } : { color: longhand }
+  }
+  const shorthand = style.background
+  if (!shorthand) {
+    return undefined
+  }
+  const trimmed = shorthand.trim()
+  if (/^transparent$/i.test(trimmed)) {
+    return { clear: true }
+  }
+  const match = /#[0-9a-fA-F]{3,8}|rgba?\([0-9.,\s%()+-]+\)/.exec(shorthand)
+  return match ? { color: match[0] } : { clear: true }
+}
+
+/**
+ * The horizontal padding (px) an element applies, from `padding` or one of
+ * the `padding-*` longhands. r-node keeps a highlighted block's breathing
+ * room, so the `<div style="padding:12px">` around a pasted section should
+ * pad its fill too. Returns the SMALLEST edge so the fill never clips a side
+ * where the author asked for more.
+ */
+function readPaddingPx(style: Record<string, string>): number | undefined {
+  const sides: string[] = []
+  const push = (k: string) => {
+    const v = style[k]
+    if (v && /\.?\d+\s*px$/.test(v.trim())) {
+      sides.push(v.trim())
+    }
+  }
+  for (const k of ['padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left']) {
+    push(k)
+  }
+  if (sides.length === 0) {
+    return undefined
+  }
+  // `padding` is a shorthand listing up to four lengths; take the smallest.
+  const px = sides.flatMap(s => s.split(/\s+/)).map(part => Number.parseFloat(part)).filter(n => !Number.isNaN(n))
+  return px.length ? Math.min(...px) : undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +201,10 @@ function sameFormatting(a: TextRun, b: TextRun): boolean {
     && a.underline === b.underline
     && a.strike === b.strike
     && a.color === b.color
+    && a.backgroundColor === b.backgroundColor
+    && a.blockBackground === b.blockBackground
+    && a.blockPadding === b.blockPadding
+    && a.fontFamily === b.fontFamily
     && a.fontSize === b.fontSize
     && a.paraGap === b.paraGap
     && a.listIndent === b.listIndent
@@ -177,6 +247,18 @@ export function normaliseRuns(runs: TextRun[]): TextRun[] {
     }
     if (run.color) {
       clean.color = run.color
+    }
+    if (run.backgroundColor) {
+      clean.backgroundColor = run.backgroundColor
+    }
+    if (run.blockBackground) {
+      clean.blockBackground = run.blockBackground
+    }
+    if (run.blockPadding !== undefined) {
+      clean.blockPadding = run.blockPadding
+    }
+    if (run.fontFamily) {
+      clean.fontFamily = run.fontFamily
     }
     if (run.fontSize) {
       clean.fontSize = run.fontSize
@@ -326,6 +408,25 @@ export function setRunColor(
   })
 }
 
+/** Set (or with `undefined`, clear) the highlight over a plain-text range. */
+export function setRunBackground(
+  runs: TextRun[],
+  start: number,
+  end: number,
+  color: string | undefined,
+): TextRun[] {
+  return mapRange(runs, start, end, (run) => {
+    const next = { ...run }
+    if (color) {
+      next.backgroundColor = color
+    }
+    else {
+      delete next.backgroundColor
+    }
+    return next
+  })
+}
+
 /** Set (or with `undefined`, clear) the per-run font size over a range. */
 export function setRunFontSize(
   runs: TextRun[],
@@ -423,12 +524,41 @@ function marksForElement(tag: string, style: Record<string, string>, inherited: 
     next.color = style.color
   }
 
-  // Headings take a size from a FIXED table, not the source's px: pasting a
-  // Word h1 must give this map's idea of a heading, not Word's 40px one
-  // scaled to a page this map does not have.
-  const heading = /^H([1-6])$/.exec(tag)
+  // Highlight: the background behind the glyphs. The colour is read from
+  // either spelling. Two kinds exist, mirroring r-node: a BLOCK element's
+  // background fills the whole paragraph behind the text (carried separately
+  // as `blockBackground` so the topic paints a filled box, not per-glyph
+  // strips), while an INLINE element's (`<mark>`, highlighted `<span>`) is a
+  // per-run wallpaper. An explicit `transparent` cancels a parent highlight.
+  const background = readBackground(style)
+  if (background !== undefined) {
+    const value = 'clear' in background ? undefined : background.color
+    if (BLOCK_TAGS.has(tag)) {
+      next.blockBackground = value
+      // The block's padding becomes breathing room inside the filled box.
+      next.blockPadding = value !== undefined ? readPaddingPx(style) : undefined
+      // A block fill must not ALSO paint per-glyph strips over itself.
+      next.backgroundColor = undefined
+    }
+    else {
+      next.backgroundColor = value
+    }
+  }
+
+  // Font-face is inherited the same way the other marks are: an element with
+  // no `font-family` declaration keeps the parent's, one with a declaration
+  // overrides it, and `inherit` explicitly cancels back to the theme default.
+  const declaredFamily = style['font-family']
+  if (declaredFamily !== undefined) {
+    next.fontFamily = /^inherit$/i.test(declaredFamily.trim()) ? undefined : declaredFamily.trim()
+  }
+
+  // Headings keep the node's own size and just turn BOLD — r-node stores an
+  // `h1` as bold at the topic's font-size with no per-run size bump, and the
+  // measure/export/editor must all draw the same thing. A fixed size table
+  // would push every pasted heading off the node's rhythm.
+  const heading = /^H[1-6]$/.test(tag)
   if (heading) {
-    next.fontSize = HEADING_SIZES[Number(heading[1]) - 1]
     next.bold = next.bold ?? true
   }
 
@@ -486,6 +616,10 @@ function pushText(state: WalkState, text: string, marks: Marks) {
   // one unreadable line everywhere except the map. The topic box is already
   // `white-space: pre-wrap`, so it renders with no new mechanism.
   const breaking = state.started ? state.pendingBreak : null
+  // True when this text opens a paragraph: either the very first run of the
+  // title or a run after a block boundary. Block fill/padding sit on the
+  // opening run of each paragraph, so even the first paragraph must carry them.
+  const opensPara = !state.started || breaking === 'block'
   let body = breaking ? `\n${text}` : text
 
   // The cap counts the boundary newline too, so the result never exceeds it.
@@ -516,6 +650,23 @@ function pushText(state: WalkState, text: string, marks: Marks) {
   }
   if (marks.color) {
     run.color = marks.color
+  }
+  // A paragraph-opening run carries the BLOCK's fill and padding so the
+  // renderer can paint one filled box behind the whole paragraph (r-node).
+  // The inline `backgroundColor` wallpaper is emitted only when it genuinely
+  // differs from that fill — under a block fill, per-glyph strips would paint
+  // over the box — and is dropped from the opening run entirely.
+  if (opensPara && marks.blockBackground) {
+    run.blockBackground = marks.blockBackground
+    if (marks.blockPadding !== undefined) {
+      run.blockPadding = marks.blockPadding
+    }
+  }
+  else if (marks.backgroundColor && marks.backgroundColor !== marks.blockBackground) {
+    run.backgroundColor = marks.backgroundColor
+  }
+  if (marks.fontFamily) {
+    run.fontFamily = marks.fontFamily
   }
   if (marks.fontSize) {
     run.fontSize = marks.fontSize
@@ -916,6 +1067,25 @@ export function runsFromHtml(html: string): TextRun[] {
 // Runs out — shared by the two renderers
 // ---------------------------------------------------------------------------
 
+/**
+ * Horizontal indent (px) for a bullet at `depth`, matching r-node: each level
+ * shifts `0.42 × fontSize`. `fontSize` is the paragraph's effective size.
+ * One number shared by the live topic, the measure layer and the SVG export
+ * so a wrapped bullet never disagrees between them (§T.4).
+ */
+export function listIndentPx(depth: number, fontSize: number): number {
+  return Math.max(0, depth) * 0.42 * fontSize
+}
+
+/**
+ * The vertical space (px) to leave above a paragraph that opens a block gap,
+ * matching r-node's `gapPx = fontSize × lineHeight × 0.6`. Proportional so
+ * the breathing room scales with the size of the text.
+ */
+export function paraGapPx(fontSize: number): number {
+  return fontSize * 1.25 * 0.6
+}
+
 /** One rendered line of a title: its runs, plus the block facts they carry. */
 export interface RunParagraph {
   runs: TextRun[]
@@ -923,6 +1093,9 @@ export interface RunParagraph {
   paraGap: boolean
   /** >0 → a bullet at this depth, with a hanging indent. */
   listIndent: number
+  /** A background filling the whole paragraph box, with its breathing room. */
+  blockBackground?: string
+  blockPadding?: number
 }
 
 /**
@@ -949,7 +1122,16 @@ export function runParagraphs(runs: TextRun[]): RunParagraph[] {
     const text = run.paraGap && run.text.startsWith('\n') ? run.text.slice(1) : run.text
 
     if (starts) {
-      out.push({ runs: [{ ...run, text }], paraGap: !!run.paraGap, listIndent: indent })
+      // Lift the block fill/padding off the opening run and onto the rendered
+      // paragraph, and drop them from every run (only meaningful once).
+      const { blockBackground, blockPadding, ...fit } = { ...run, text }
+      out.push({
+        runs: [fit as TextRun],
+        paraGap: !!run.paraGap,
+        listIndent: indent,
+        blockBackground,
+        blockPadding: blockBackground !== undefined ? blockPadding : undefined,
+      })
     }
     else {
       previous.runs.push({ ...run, text })
@@ -984,6 +1166,17 @@ export function runStyle(run: TextRun): Record<string, string> {
   }
   if (run.color) {
     style.color = run.color
+  }
+  if (run.backgroundColor) {
+    style.backgroundColor = run.backgroundColor
+    // A highlight is wallpaper behind the text: the box must not inherit it
+    // past the run' glyphs when a topic resizes, but on a light map the
+    // wallpaper needs its own padding so the highlight is readable, not flush
+    // against the letters.
+    style.padding = '0 1px'
+  }
+  if (run.fontFamily) {
+    style.fontFamily = run.fontFamily
   }
   if (run.fontSize) {
     style.fontSize = `${run.fontSize}px`

@@ -301,25 +301,27 @@ function onWheel(event: WheelEvent) {
   }
 }
 
-// Pan by dragging the empty ground (left button) or by middle-dragging
-// anywhere. Pointer capture keeps the drag alive outside the window. Camera
-// deltas are screen pixels, so raw client deltas feed panBy directly.
+// Pan by dragging the empty ground with the RIGHT (or middle) button — the
+// context-menu button doubles as the map-move button so LEFT stays free for
+// selecting, marquee and dragging topics. Shift is reserved for the marquee.
 const panning = ref(false)
 let panPointer: number | null = null
+let panButton = 0
 let panLast = { x: 0, y: 0 }
 let panDistance = 0
 
 function onGroundPointerDown(event: PointerEvent) {
-  if (event.button !== 0 && event.button !== 1) {
+  // Right or middle button only. The LEFT button is no longer a pan: it is
+  // selection, the shift-marquee, and topic dragging — clicking the pointer
+  // down on a topic to drag it must not also drag the map.
+  if (event.button !== 2 && event.button !== 1) {
     return
   }
-  // Shift+drag on the ground is the marquee (C.4); MindmapInteraction owns
-  // that gesture and its pointer capture, so the pan must stand down rather
-  // than fight it for the same pointer.
   if (event.shiftKey) {
     return
   }
   panPointer = event.pointerId
+  panButton = event.button
   panLast = { x: event.clientX, y: event.clientY }
   panDistance = 0
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
@@ -343,10 +345,12 @@ function onGroundPointerEnd(event: PointerEvent) {
   }
   panPointer = null
   panning.value = false
-  // A press that never became a drag is a click on the empty ground, and a
-  // click on the ground clears the selection (C.4); a drag pans, as it always
-  // did. Same small threshold the drag detector in MindmapInteraction uses.
-  if (panDistance < 4) {
+  // A press that never became a drag is a click on the empty ground: a LEFT
+  // one clears the selection; a RIGHT one does nothing and gets to open the
+  // node's context menu via the normal window listener. A middle-click is a
+  // pan scroll and is never a menu.
+  if (panDistance < 4 && panButton === 0) {
+    // (unreachable: left is bailed out at pointerdown; kept for clarity)
     store.clearSelection()
   }
 }

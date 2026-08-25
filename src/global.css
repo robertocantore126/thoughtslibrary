@@ -43,8 +43,8 @@ DEFAULT_STYLE.padding is the inspector-facing default, not this render inset.)
 .mindmap-node {
     position: absolute;
     box-sizing: border-box;
-    background: rgba(0, 0, 0, 0.62);
-    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(0, 0, 0, 0.25);
     border-radius: 10px;
     color: inherit;
     font-size: 14px;
