@@ -438,10 +438,22 @@ function auditSession(input: AuditInput, problems: Problem[]): void {
   }
 }
 
-function measureLocalStorage(): Record<string, unknown> {
+/**
+ * Everything this app is entitled to write. Anything else in localStorage
+ * belongs to something sharing the origin.
+ */
+const OWN_KEYS = new Set(['charts', 'activeChart', 'activeTab', 'lastChartFilePath', 'unreadableChartsBackup', 'oldChartsBackup'])
+const OWN_PREFIXES = ['lastChartFilePath:', 'tracer:']
+
+function isOwnKey(key: string): boolean {
+  return OWN_KEYS.has(key) || OWN_PREFIXES.some(prefix => key.startsWith(prefix))
+}
+
+function measureLocalStorage(problems: Problem[]): Record<string, unknown> {
   try {
     let total = 0
     const perKey: Record<string, number> = {}
+    const foreign: Record<string, number> = {}
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i)
       if (!key) {
@@ -450,8 +462,34 @@ function measureLocalStorage(): Record<string, unknown> {
       const size = (localStorage.getItem(key) || '').length
       perKey[key] = size
       total += size
+      if (!isOwnKey(key)) {
+        foreign[key] = size
+      }
     }
-    return { totalChars: total, approxMB: Math.round((total / 1024 / 1024) * 100) / 100, perKey }
+
+    // localStorage is keyed by ORIGIN, not by app. Two dev servers on the same
+    // host and port are one storage area — so a sibling app's documents sit
+    // beside this one's, and anything here that clears or rewrites storage
+    // wholesale would take them with it. Worth saying out loud: it is
+    // invisible from inside either app.
+    const foreignKeys = Object.keys(foreign)
+    if (foreignKeys.length > 0) {
+      problems.push({
+        id: 'shared-origin-storage',
+        sub: 'persist',
+        severity: 'warning',
+        message: `${foreignKeys.length} localStorage key(s) here belong to another app sharing this origin (${window.location.origin}).`,
+        where: 'give each app its own port',
+        detail: { keys: foreign, ownOrigin: window.location.origin },
+      })
+    }
+
+    return {
+      totalChars: total,
+      approxMB: Math.round((total / 1024 / 1024) * 100) / 100,
+      perKey,
+      foreignKeys: foreignKeys.length,
+    }
   }
   catch (error) {
     return serialiseError(error)
@@ -478,7 +516,7 @@ export async function buildReport(input: AuditInput): Promise<TraceReport> {
     ['chart', () => auditChart(input, problems)],
     ['storage', () => auditStorage(input.chart, problems)],
     ['assets', () => auditAssets(input.chart, problems)],
-    ['localStorage', () => measureLocalStorage()],
+    ['localStorage', () => measureLocalStorage(problems)],
     // summariseChart walks `items` and `size` unguarded — reasonable for the
     // export path, which only ever sees a live store chart. The tracer is
     // pointed at broken ones by definition, so it hands over a padded shape.

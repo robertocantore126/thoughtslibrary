@@ -445,6 +445,36 @@ export async function deleteSheet(id: string): Promise<void> {
   })
 }
 
+/**
+ * Deletes every stored sheet that `referencedSheetIds` does not name, and
+ * returns the ids it removed. The mirror of collectUnusedAssets in
+ * helpers/assets.ts, and it carries the same warning: the root set is only
+ * what the CALLER can see. A sheet belonging to a chart this window cannot
+ * read is indistinguishable from an orphan, and deleting one destroys a
+ * document with no copy anywhere.
+ *
+ * Unlike the asset store there is no write timestamp here, so there is no
+ * grace period to fall back on — the caller's gates are the only protection,
+ * and it must not call this unless it holds ALL of them:
+ *
+ *   - no other window is open (its charts, and their sheets, are invisible)
+ *   - every referenced sheet read cleanly (one that did not may belong to a
+ *     chart whose remaining sheets are live)
+ *
+ * Returns [] rather than throwing when storage is unavailable: a sweep that
+ * cannot run is not an error, it is a sweep that reclaims nothing today.
+ */
+export async function collectUnusedSheets(referencedSheetIds: Set<string>): Promise<string[]> {
+  const stored = await listSheetIds()
+  const orphans = stored.filter(id => !referencedSheetIds.has(id))
+
+  for (const id of orphans) {
+    await deleteSheet(id)
+  }
+
+  return orphans
+}
+
 export async function listSheetIds(): Promise<string[]> {
   const db = await openDb()
   if (!db) {
