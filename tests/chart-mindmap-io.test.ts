@@ -16,6 +16,62 @@ import 'fake-indexeddb/auto'
 // period can be bypassed by ageing a blob's write time directly (assets.ts
 // deliberately does not export its internals).
 const ASSET_DB = 'thoughtslibrary-assets'
+const SHEET_DB = 'thoughtslibrary-mindmaps'
+
+// FileReader is absent from the node test runner, and `readBlobAsDataUrl` —
+// the last step of the export path that turns a stored blob into the data URI
+// the file carries — is built on it. Shimmed rather than skipped: that single
+// line is what puts the image bytes into the saved chart, so a suite about the
+// save format that cannot execute it is not testing the thing it claims to.
+class DataUrlReader {
+  result: string | null = null
+  error: unknown = null
+  onload: (() => void) | null = null
+  onerror: (() => void) | null = null
+
+  readAsDataURL(blob: Blob): void {
+    blob
+      .arrayBuffer()
+      .then((buffer) => {
+        const base64 = Buffer.from(buffer).toString('base64')
+        this.result = `data:${blob.type || 'application/octet-stream'};base64,${base64}`
+        this.onload?.()
+      })
+      .catch((err: unknown) => {
+        this.error = err
+        this.onerror?.()
+      })
+  }
+}
+;(globalThis as unknown as { FileReader: unknown }).FileReader ??= DataUrlReader
+
+// Empties a database's object stores without deleting the database, which
+// would deadlock against the connections assets.ts and storage.ts hold open.
+// This is the "another machine" simulation: the file is all that survives.
+function clearStores(dbName: string, stores: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(dbName)
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => {
+      const db = request.result
+      const present = stores.filter(name => db.objectStoreNames.contains(name))
+      if (present.length === 0) {
+        db.close()
+        resolve()
+        return
+      }
+      const tx = db.transaction(present, 'readwrite')
+      for (const name of present) {
+        tx.objectStore(name).clear()
+      }
+      tx.oncomplete = () => {
+        db.close()
+        resolve()
+      }
+      tx.onerror = () => reject(tx.error)
+    }
+  })
+}
 
 function baseChart(): Chart {
   return {
@@ -302,5 +358,46 @@ describe('part B — the orphan sweep protects sheet images', () => {
   it('collectSheetAssetIds tolerates an absent sheet and an empty into-set default', () => {
     expect(collectSheetAssetIds(null).size).toBe(0)
     expect(collectSheetAssetIds(undefined).size).toBe(0)
+  })
+})
+
+describe('part C — a topic image survives the trip to another machine', () => {
+  it('carries the bytes in the file and restores them into an empty store', async () => {
+    const pixels = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
+    const url = await storeLocalImage(new Blob([pixels], { type: 'image/png' }))
+    const originalAssetId = assetIdOf(url)
+
+    const sheet = await storedSheet('Illustrated')
+    sheet.nodes[sheet.rootNodeId].style.image = url
+    await writeSheet(sheet.sheetId, sheet)
+
+    const chart = baseChart()
+    chart.mindmaps = { 'tile-1': sheet.sheetId }
+
+    const exported = await inlineStoredChartAssets({ timestamp: 1, data: chart })
+
+    // The file must be self-contained: the sheet AND the pixels.
+    expect(exported.data.mindmapSheets?.[sheet.sheetId]).toBeTruthy()
+    expect(exported.data.mindmapAssets?.[originalAssetId]).toMatch(/^data:image\/png;base64,/)
+
+    // Simulate the other machine: nothing local survives except the file.
+    await clearStores(SHEET_DB, ['sheets'])
+    await clearStores(ASSET_DB, ['images', 'imageMeta'])
+    expect(await readSheet(sheet.sheetId)).toBeNull()
+    expect(await assetBlobExists(originalAssetId)).toBe(false)
+
+    const restored = await persistChartAssets(structuredClone(exported.data))
+
+    const freshSheetId = restored.mindmaps?.['tile-1']
+    expect(freshSheetId).toBeTruthy()
+    const reopened = await readSheet(freshSheetId!)
+    expect(reopened?.title).toBe('Illustrated')
+
+    // The topic points at a LOCAL asset that actually holds bytes on this
+    // machine — not at the exporting machine's id, and not at a data URI left
+    // inline in the sheet.
+    const restoredUrl = reopened?.nodes[reopened.rootNodeId].style.image
+    expect(restoredUrl?.startsWith('local-asset://')).toBe(true)
+    expect(await assetBlobExists(assetIdOf(restoredUrl!))).toBe(true)
   })
 })
