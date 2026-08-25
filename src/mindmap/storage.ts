@@ -11,6 +11,7 @@
  * to null / [] / undefined and the app keeps working without persistence
  * rather than dying at startup.
  */
+import { beginOp, emit } from '../dev/traceCore'
 import { DEFAULT_STRUCTURE, type MindNode, SCHEMA_VERSION, type Sheet } from './types'
 
 const DB_NAME = 'thoughtslibrary-mindmaps'
@@ -331,12 +332,30 @@ export async function readSheet(id: string): Promise<Sheet | null> {
 // `result.error` fails to narrow in the else branch.
 export type WriteResult = { ok: true, error?: undefined } | { ok: false, error: string }
 
-export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult> {
+export async function writeSheet(id: string, sheet: Sheet, parentId?: string): Promise<WriteResult> {
+  const span = beginOp('WRITE', 'persist', {
+    key: id,
+    nodes: Object.keys(sheet.nodes || {}).length,
+    relationships: sheet.relationships?.length ?? 0,
+  }, parentId)
+
+  // The key IS the identity. Caught here rather than only in the audit, so the
+  // trace shows the MOMENT the two diverged instead of the fact that they have.
+  // Reported, never corrected: writing to a different key than the caller asked
+  // for would be the tracer changing behaviour.
+  if (sheet.sheetId !== id) {
+    emit('persist', 'persistence:identity-mismatch', {
+      storageKey: id,
+      documentSheetId: sheet.sheetId,
+    }, { traceId: span.id, phase: 'error', min: 'error' })
+  }
+
   const db = await openDb()
   if (!db) {
     // The sheet itself is never cached in memory for later retry — degrade
     // loudly rather than pretend the edit was saved.
     console.error('IndexedDB is unavailable; mindmap changes are not being saved')
+    span.error({ reason: 'unavailable' })
     return { ok: false, error: 'Storage is unavailable' }
   }
 
@@ -352,10 +371,12 @@ export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult>
       // store that vanished under a version change), and that path never
       // reached the handlers below.
       console.error('Failed to open a mindmap write transaction:', error)
+      span.error({ reason: 'transaction-open-threw' })
       resolve({ ok: false, error: describeWriteError(error) })
       return
     }
     transaction.oncomplete = () => {
+      span.end({ ok: true })
       resolve({ ok: true })
     }
     request.onerror = () => {
@@ -363,14 +384,17 @@ export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult>
       // editing, the next debounced write tries again — but the failure is
       // now reported rather than swallowed.
       console.error('Failed to write mindmap sheet:', request.error)
+      span.error({ reason: 'request', name: request.error?.name })
       resolve({ ok: false, error: describeWriteError(request.error) })
     }
     transaction.onerror = () => {
       console.error('Failed to commit mindmap sheet:', transaction.error)
+      span.error({ reason: 'commit', name: transaction.error?.name })
       resolve({ ok: false, error: describeWriteError(transaction.error) })
     }
     transaction.onabort = () => {
       console.error('Mindmap sheet transaction aborted:', transaction.error)
+      span.error({ reason: 'abort', name: transaction.error?.name })
       resolve({ ok: false, error: describeWriteError(transaction.error) })
     }
   })
@@ -419,6 +443,36 @@ export async function deleteSheet(id: string): Promise<void> {
       resolve()
     }
   })
+}
+
+/**
+ * Deletes every stored sheet that `referencedSheetIds` does not name, and
+ * returns the ids it removed. The mirror of collectUnusedAssets in
+ * helpers/assets.ts, and it carries the same warning: the root set is only
+ * what the CALLER can see. A sheet belonging to a chart this window cannot
+ * read is indistinguishable from an orphan, and deleting one destroys a
+ * document with no copy anywhere.
+ *
+ * Unlike the asset store there is no write timestamp here, so there is no
+ * grace period to fall back on — the caller's gates are the only protection,
+ * and it must not call this unless it holds ALL of them:
+ *
+ *   - no other window is open (its charts, and their sheets, are invisible)
+ *   - every referenced sheet read cleanly (one that did not may belong to a
+ *     chart whose remaining sheets are live)
+ *
+ * Returns [] rather than throwing when storage is unavailable: a sweep that
+ * cannot run is not an error, it is a sweep that reclaims nothing today.
+ */
+export async function collectUnusedSheets(referencedSheetIds: Set<string>): Promise<string[]> {
+  const stored = await listSheetIds()
+  const orphans = stored.filter(id => !referencedSheetIds.has(id))
+
+  for (const id of orphans) {
+    await deleteSheet(id)
+  }
+
+  return orphans
 }
 
 export async function listSheetIds(): Promise<string[]> {

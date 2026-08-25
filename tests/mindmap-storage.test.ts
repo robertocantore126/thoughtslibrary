@@ -1,6 +1,6 @@
 import type { MindNode, Sheet } from '../src/mindmap/types'
-import { describe, expect, it } from 'vitest'
-import { blankSheet, deleteSheet, listSheetIds, readSheet, readSheetResult, writeSheet } from '../src/mindmap/storage'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { blankSheet, collectUnusedSheets, deleteSheet, listSheetIds, readSheet, readSheetResult, writeSheet } from '../src/mindmap/storage'
 import 'fake-indexeddb/auto'
 
 /**
@@ -155,5 +155,75 @@ describe('readSheetResult', () => {
     const again = await readSheetResult('key-a')
     expect(again.kind === 'ok' && again.sheet.sheetId).toBe('key-a')
     await expect(readSheet('claims-to-be-b')).resolves.toBeNull()
+  })
+})
+
+/**
+ * The sweep that finally gives deleteSheet a caller. A real capture from a
+ * real chart found five orphaned sheets against two live ones — every map
+ * whose tile or chart had been deleted was still on disk, forever.
+ *
+ * These tests are mostly about what it must NOT delete. There is no write
+ * timestamp on a sheet, so unlike the asset store there is no grace period to
+ * absorb a mistake: whatever this removes is gone.
+ */
+describe('collectUnusedSheets', () => {
+  // The store is shared across this file, so earlier tests' sheets would join
+  // every root set and make the assertions below about the wrong population.
+  beforeEach(async () => {
+    for (const id of await listSheetIds()) {
+      await deleteSheet(id)
+    }
+  })
+
+  it('removes the sheets nothing references, and returns which', async () => {
+    const live = blankSheet('Live')
+    const orphan = blankSheet('Orphan')
+    await writeSheet(live.sheetId, live)
+    await writeSheet(orphan.sheetId, orphan)
+
+    const removed = await collectUnusedSheets(new Set([live.sheetId]))
+
+    expect(removed).toEqual([orphan.sheetId])
+    await expect(readSheet(orphan.sheetId)).resolves.toBeNull()
+    // The live one is untouched, which is the whole point.
+    await expect(readSheet(live.sheetId)).resolves.toEqual(live)
+  })
+
+  it('deletes nothing when every sheet is referenced', async () => {
+    const a = blankSheet('A')
+    const b = blankSheet('B')
+    await writeSheet(a.sheetId, a)
+    await writeSheet(b.sheetId, b)
+
+    const removed = await collectUnusedSheets(new Set([a.sheetId, b.sheetId]))
+
+    expect(removed).toEqual([])
+    expect(await listSheetIds()).toEqual(expect.arrayContaining([a.sheetId, b.sheetId]))
+  })
+
+  it('deletes EVERY sheet when handed an empty root set', async () => {
+    // Not a nicety: an empty root set is what a caller produces when it failed
+    // to read the charts. The function cannot tell that apart from "nothing is
+    // referenced", which is exactly why the caller must hold its gates before
+    // calling — this test pins the sharp edge so it stays documented.
+    const a = blankSheet('A')
+    await writeSheet(a.sheetId, a)
+
+    const removed = await collectUnusedSheets(new Set())
+
+    expect(removed).toContain(a.sheetId)
+    await expect(readSheet(a.sheetId)).resolves.toBeNull()
+  })
+
+  it('reclaims nothing, and does not throw, without IndexedDB', async () => {
+    const original = globalThis.indexedDB
+    Object.defineProperty(globalThis, 'indexedDB', { value: undefined, configurable: true })
+    try {
+      await expect(collectUnusedSheets(new Set())).resolves.toEqual([])
+    }
+    finally {
+      Object.defineProperty(globalThis, 'indexedDB', { value: original, configurable: true })
+    }
   })
 })

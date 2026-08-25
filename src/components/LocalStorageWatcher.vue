@@ -16,7 +16,7 @@ import {
   updateStoredChart,
 } from '../helpers/localStorage'
 import { detectOtherWindows, reportPersistFailure, reportPersistSuccess } from '../helpers/persistStatus'
-import { readSheet } from '../mindmap/storage'
+import { collectUnusedSheets, readSheet } from '../mindmap/storage'
 import { useStore } from '../store'
 
 const store = useStore()
@@ -167,6 +167,9 @@ async function loadStoredCharts() {
     }
     else {
       const referenced = new Set<string>()
+      // The sheets some chart still points at. Doubles as the root set for the
+      // sheet sweep below, so the two cannot disagree about what is live.
+      const referencedSheetIds = new Set<string>()
       let sheetReadFailed = false
       for (const [, chart] of normalizedEntries) {
         collectChartAssetIds(chart.data, referenced)
@@ -174,6 +177,7 @@ async function loadStoredCharts() {
         // every sheet of every stored chart joins the root set — not just the
         // active one; the sweep runs across all charts.
         for (const sheetId of Object.values(chart.data?.mindmaps ?? {})) {
+          referencedSheetIds.add(sheetId)
           const sheet = await readSheet(sheetId)
           if (!sheet) {
             sheetReadFailed = true
@@ -190,6 +194,24 @@ async function loadStoredCharts() {
       if (sheetReadFailed || normalizedEntries.some(([, chart]) => !chart?.data)) {
         throw new Error('A chart or sheet could not be read; skipping the sweep rather than collecting against an incomplete root set')
       }
+      // Sheets nothing points at. Deleting a tile or a chart only ever dropped
+      // the reference — deleteSheet existed but nothing called it — so every
+      // map outlived whatever pointed at it, forever. A real capture from a
+      // real chart found five of them against two live ones.
+      //
+      // This runs only past the two gates above, and that is the whole safety
+      // argument: no other window is open (its charts are invisible from here,
+      // so its sheets would look orphaned), and every referenced sheet read
+      // cleanly (one that did not could belong to a chart whose other sheets
+      // are live). Sheets carry no write timestamp, so unlike the asset store
+      // there is no grace period to fall back on — the gates ARE the grace.
+      const orphanSheetIds = await collectUnusedSheets(referencedSheetIds)
+      if (orphanSheetIds.length > 0) {
+        // Named, not counted: deleting a document is irreversible, and the one
+        // question afterwards is always "which ones".
+        console.warn(`Reclaimed ${orphanSheetIds.length} mindmap sheet(s) no chart referenced:\n  ${orphanSheetIds.join('\n  ')}`)
+      }
+
       await collectUnusedAssets(referenced)
     }
   }

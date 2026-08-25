@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { v4 as uuidv4 } from 'uuid'
+import { useMindmapStore } from './mindmap/store'
 import {
   BackgroundTypes,
   type Chart,
@@ -340,9 +341,36 @@ function blockingParentTitles(chart: Chart, axis: 'x' | 'y', minDimension: numbe
   return [...new Set(titles)]
 }
 
+// The mindmap entry spot, reserved in the focused tile's layer (Lane F): a
+// fixed cell — preferred bottom-right of the parent, "il primo tile in basso a
+// destra" — that no layer tile can occupy. It falls back clockwise from
+// south-east when that cell is out of bounds or already holds a layer tile (a
+// layer born before the spot existed), and returns null only when every
+// surrounding cell is taken or off-grid. Exported for the layer tests.
+export function reservedMindmapOffset(
+  parentCoord: { x: number, y: number },
+  size: ChartSize,
+  layer: RelatedLayer,
+): string | null {
+  const order = ['1,1', '0,1', '1,0', '-1,1', '-1,0', '0,-1', '1,-1', '-1,-1']
+  for (const offset of order) {
+    const delta = parseOffset(offset)
+    if (!isInBounds(parentCoord.x + delta.x, parentCoord.y + delta.y, size)) {
+      continue
+    }
+    if (layer[offset]) {
+      continue
+    }
+    return offset
+  }
+  return null
+}
+
 // First unoccupied in-bounds offset for the layer, scanning row-major.
-// "0,0" is the parent's own cell and is never stored.
+// "0,0" is the parent's own cell and is never stored; the reserved mindmap
+// spot is not a layer cell either, so auto-placement skips it.
 function firstEmptyLayerOffset(chart: Chart, parentCoord: { x: number, y: number }, layer: RelatedLayer): string | null {
+  const spot = reservedMindmapOffset(parentCoord, chart.size, layer)
   const minDx = -(parentCoord.x - 1)
   const maxDx = chart.size.x - parentCoord.x
   const minDy = -(parentCoord.y - 1)
@@ -354,6 +382,9 @@ function firstEmptyLayerOffset(chart: Chart, parentCoord: { x: number, y: number
         continue
       }
       const key = offsetKey(dx, dy)
+      if (key === spot) {
+        continue
+      }
       if (!layer[key]) {
         return key
       }
@@ -865,6 +896,19 @@ export const useStore = defineStore('store', {
         mindmaps: { ...(this.chart.mindmaps || {}), [itemId]: sheetId },
       }
     },
+    // The focus-layer spot's "Yes": creates and persists a blank sheet and
+    // records it on the tile WITHOUT opening the overlay, so the spot flips to
+    // the mindmap icon and the user opens the map from there. A refused write
+    // leaves the toggle in place (returns false).
+    async createMindmapForTile(itemId: string): Promise<boolean> {
+      const mindmap = useMindmapStore()
+      const sheetId = await mindmap.createBlankSheet()
+      if (!sheetId) {
+        return false
+      }
+      this.setMindmapSheetId(itemId, sheetId)
+      return true
+    },
     clearActiveTile() {
       this.selection = null
       this.notesPopupKey = null
@@ -1196,6 +1240,11 @@ export const useStore = defineStore('store', {
       if (layer[targetOffset]) {
         return
       }
+      // The reserved mindmap spot is not a layer cell: the + button toward it
+      // must never create a tile that would cover the spot.
+      if (targetOffset === reservedMindmapOffset(parentCoord, this.chart.size, layer)) {
+        return
+      }
       layer[targetOffset] = createLayerTile()
       layers[p.parentId] = layer
       this.chart = chartWithLayers(this.chart, layers)
@@ -1475,6 +1524,21 @@ export const useStore = defineStore('store', {
         return null
       }
       return state.chart.relatedLayers?.[state.focusedTileId] || null
+    },
+    // The relative offset of the reserved mindmap spot inside the focused
+    // tile's layer — the fixed cell (bottom-right preferred) that hosts the
+    // "Has mindmap?" Yes/No and then the mindmap icon. Null when the focused
+    // tile has no free surrounding cell.
+    focusedMindmapSpotOffset(state): string | null {
+      if (!state.focusedTileId) {
+        return null
+      }
+      const parentCoord = findItemCoord(state.chart.coordinates || {}, state.focusedTileId)
+      if (!parentCoord) {
+        return null
+      }
+      const layer = state.chart.relatedLayers?.[state.focusedTileId] || {}
+      return reservedMindmapOffset(parentCoord, state.chart.size, layer)
     },
     focusedTileCoord(state): { x: number, y: number } | null {
       if (!state.focusedTileId) {

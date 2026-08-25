@@ -155,7 +155,7 @@ describe('mindmap store — open and history', () => {
     expect(store.sheet).not.toBeNull()
     expect(store.sheet.rootNodeId).toBeTruthy()
     expect(vi.mocked(blankSheet)).toHaveBeenCalledWith('Untitled')
-    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith(store.sheet.sheetId, store.sheet)
+    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith(store.sheet.sheetId, store.sheet, expect.any(String))
   })
 
   it('open() with an unknown id creates a blank sheet in its place', async () => {
@@ -166,6 +166,28 @@ describe('mindmap store — open and history', () => {
     expect(vi.mocked(readSheetResult)).toHaveBeenCalledWith('missing')
     expect(vi.mocked(blankSheet)).toHaveBeenCalledWith('Untitled')
     expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
+  })
+
+  it('createBlankSheet creates and persists a fresh sheet without touching the open state', async () => {
+    vi.mocked(writeSheet).mockResolvedValue({ ok: true })
+    const store = useMindmapStore()
+
+    const id = await store.createBlankSheet()
+
+    expect(id).toBeTruthy()
+    expect(vi.mocked(blankSheet)).toHaveBeenCalledWith('Untitled')
+    expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
+    // The "has mindmap?" Yes must not open or swap the store's sheet.
+    expect(store.sheet).toBeNull()
+    expect(store.canUndo).toBe(false)
+  })
+
+  it('createBlankSheet reports failure when storage refuses the write', async () => {
+    vi.mocked(writeSheet).mockResolvedValue({ ok: false, error: 'quota' })
+    const store = useMindmapStore()
+
+    const id = await store.createBlankSheet()
+    expect(id).toBeNull()
   })
 
   it('close() flushes a pending autosave and drops the sheet', async () => {
@@ -179,7 +201,7 @@ describe('mindmap store — open and history', () => {
     await store.close()
 
     expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s8', expect.anything())
+    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s8', expect.anything(), expect.any(String))
     expect(store.sheet).toBeNull()
     expect(store.selection).toEqual([])
     expect(store.undo()).toBe(false)
@@ -307,6 +329,50 @@ describe('mindmap store — editing actions', () => {
     expect(store.selection).toEqual([])
   })
 
+  it('image refs are selectable only on a node that carries an image, and removeNodeImage deletes just the picture', async () => {
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('sImg', 'Sheet') })
+    const store = useMindmapStore()
+    await store.open('sImg')
+
+    const id = store.createChild('root')
+
+    // A node with no image has no image to select — the ref is refused like
+    // any ref that resolves to nothing, and the remove is a no-op that adds
+    // nothing to history (undo still lands on the createChild above).
+    store.select({ kind: 'image', id })
+    expect(store.selection).toEqual([])
+    store.removeNodeImage(id)
+    expect(store.undo()).toBe(true)
+    expect(store.sheet.nodes[id]).toBeUndefined()
+    store.redo()
+    expect(store.sheet.nodes[id]).toBeDefined()
+
+    // Attach an image (the inspector's setNodeStyle path) and select it.
+    store.setNodeStyle(id, { image: 'local-asset://abc', imageWidth: 120, imageAspect: 0.75 })
+    store.select({ kind: 'image', id })
+    expect(store.isSelected({ kind: 'image', id })).toBe(true)
+    // An image ref is not a node ref: the topic itself is not selected, and
+    // the inspector (primaryNodeId) sees nothing to edit.
+    expect(store.isSelected({ kind: 'node', id })).toBe(false)
+    expect(store.primaryNodeId).toBeNull()
+
+    // Delete the image WITHOUT deleting the node: the fields are cleared in
+    // one op, the topic survives, and the image ref dies with the image
+    // (publish's alive filter).
+    store.removeNodeImage(id)
+    expect(store.sheet.nodes[id]).toBeDefined()
+    expect(store.sheet.nodes[id].style.image).toBeUndefined()
+    expect(store.sheet.nodes[id].style.imageWidth).toBeUndefined()
+    expect(store.sheet.nodes[id].style.imageAspect).toBeUndefined()
+    expect(store.isSelected({ kind: 'image', id })).toBe(false)
+
+    // One undo restores the whole image in one step.
+    expect(store.undo()).toBe(true)
+    expect(store.sheet.nodes[id].style.image).toBe('local-asset://abc')
+    expect(store.sheet.nodes[id].style.imageWidth).toBe(120)
+    expect(store.sheet.nodes[id].style.imageAspect).toBe(0.75)
+  })
+
   it('publishes a new sheet reference on every edit', async () => {
     vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s12', 'Sheet') })
     const store = useMindmapStore()
@@ -362,7 +428,7 @@ describe('mindmap store — layout bridge', () => {
 
     await vi.advanceTimersByTimeAsync(500)
     expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s7', store.sheet)
+    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s7', store.sheet, expect.any(String))
   })
 
   // S4 Round 0 job 5. Before it, writeSheet resolved identically whether or not

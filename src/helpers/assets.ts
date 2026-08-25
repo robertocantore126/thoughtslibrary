@@ -449,6 +449,29 @@ async function readAssetWriteTimes(db: IDBDatabase): Promise<Map<string, number>
  * The caller is responsible for not running this at all while another window is
  * open, since that window's root set is invisible from here entirely.
  */
+/**
+ * Every blob id the asset store holds. Read-only, for the tracer: comparing
+ * this against the ids the charts and sheets reference is what turns "storage
+ * feels wrong" into a list of orphans and a list of dangling references.
+ */
+export async function listAssetIds(): Promise<string[]> {
+  const db = await openAssetDb()
+  if (!db) {
+    return []
+  }
+
+  return await new Promise<string[]>((resolve) => {
+    try {
+      const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAllKeys()
+      request.onsuccess = () => resolve((request.result as IDBValidKey[]).map(String))
+      request.onerror = () => resolve([])
+    }
+    catch {
+      resolve([])
+    }
+  })
+}
+
 export async function collectUnusedAssets(referencedIds: Set<string>): Promise<number> {
   const db = await openAssetDb()
   if (!db) {

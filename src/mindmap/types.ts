@@ -13,14 +13,20 @@
 export const SCHEMA_VERSION = '0.1.0'
 
 /**
- * What one entry of the store's selection points at. The map holds three kinds
- * of selectable thing — topics, relationships and boundaries — and Delete has
- * to act on the right one, so the kind travels with the id rather than being
- * inferred by looking the id up in three collections and seeing which hits
- * (S4 §0.3).
+ * What one entry of the store's selection points at. The map holds four kinds
+ * of selectable thing — topics, relationships, boundaries and a topic's image
+ * — and Delete has to act on the right one, so the kind travels with the id
+ * rather than being inferred by looking the id up in three collections and
+ * seeing which hits (S4 §0.3).
+ *
+ * An `image` ref uses the OWNING topic's id: a topic renders exactly one
+ * selectable image (the top slot, `Style.image`), so the id space is the
+ * node id space, and the ref is alive only while that node still carries an
+ * image (store.publish / refExists). Delete on an image clears the image
+ * fields instead of removing the node.
  */
 export interface SelRef {
-  kind: 'node' | 'relationship' | 'group'
+  kind: 'node' | 'relationship' | 'group' | 'image'
   id: string
 }
 
