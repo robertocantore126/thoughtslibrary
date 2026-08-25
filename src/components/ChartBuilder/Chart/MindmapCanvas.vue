@@ -277,16 +277,28 @@ const edgeSizes = computed<Record<string, NodeSize>>(() => sizesForLayout())
 // Pan and zoom
 // ---------------------------------------------------------------------------
 
-// Wheel zooms anchored at the cursor: the world point under the pointer stays
-// under the pointer, which is what makes zoom feel like magnifying rather than
-// like the map sliding away. The store clamps the scale.
+// Wheel: a plain wheel (and a two-finger trackpad scroll) PANS the map; only
+// Ctrl/Cmd+wheel — which is what a trackpad pinch sends — zooms, anchored at
+// the cursor (C.4). Before S4 every wheel event zoomed, so two-finger scroll
+// flung the zoom level instead of moving the map. The zoom anchoring is
+// unchanged: the world point under the pointer stays under the pointer, which
+// is what makes zoom feel like magnifying rather than like the map sliding
+// away. The store clamps the scale.
 function onWheel(event: WheelEvent) {
   const rect = canvasRoot.value?.getBoundingClientRect()
   if (!rect) {
     return
   }
-  const factor = Math.exp(-event.deltaY * 0.0015)
-  store.zoomAt(event.clientX - rect.left, event.clientY - rect.top, factor)
+  if (event.ctrlKey || event.metaKey) {
+    const factor = Math.exp(-event.deltaY * 0.0015)
+    store.zoomAt(event.clientX - rect.left, event.clientY - rect.top, factor)
+  }
+  else {
+    // The wheel moves the map the way a page scrolls: wheel down (deltaY > 0)
+    // shows the content below, so the camera slides up. The delta sign already
+    // carries the platform's natural-scrolling direction.
+    store.panBy(-event.deltaX, -event.deltaY)
+  }
 }
 
 // Pan by dragging the empty ground (left button) or by middle-dragging
@@ -295,13 +307,21 @@ function onWheel(event: WheelEvent) {
 const panning = ref(false)
 let panPointer: number | null = null
 let panLast = { x: 0, y: 0 }
+let panDistance = 0
 
 function onGroundPointerDown(event: PointerEvent) {
   if (event.button !== 0 && event.button !== 1) {
     return
   }
+  // Shift+drag on the ground is the marquee (C.4); MindmapInteraction owns
+  // that gesture and its pointer capture, so the pan must stand down rather
+  // than fight it for the same pointer.
+  if (event.shiftKey) {
+    return
+  }
   panPointer = event.pointerId
   panLast = { x: event.clientX, y: event.clientY }
+  panDistance = 0
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   panning.value = true
 }
@@ -310,7 +330,10 @@ function onGroundPointerMove(event: PointerEvent) {
   if (event.pointerId !== panPointer) {
     return
   }
-  store.panBy(event.clientX - panLast.x, event.clientY - panLast.y)
+  const dx = event.clientX - panLast.x
+  const dy = event.clientY - panLast.y
+  panDistance += Math.hypot(dx, dy)
+  store.panBy(dx, dy)
   panLast = { x: event.clientX, y: event.clientY }
 }
 
@@ -320,6 +343,12 @@ function onGroundPointerEnd(event: PointerEvent) {
   }
   panPointer = null
   panning.value = false
+  // A press that never became a drag is a click on the empty ground, and a
+  // click on the ground clears the selection (C.4); a drag pans, as it always
+  // did. Same small threshold the drag detector in MindmapInteraction uses.
+  if (panDistance < 4) {
+    store.clearSelection()
+  }
 }
 
 let resizeObserver: ResizeObserver | null = null
