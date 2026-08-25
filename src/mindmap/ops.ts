@@ -75,7 +75,7 @@ export function makeOp<T extends OpShape>(type: T['type'], payload: Omit<T, 'typ
 }
 
 /** Style field that holds the attachment id for a given image slot. */
-export function slotKey(slot: ImageSlot): 'image' | 'imageBottom' | 'imageLeft' | 'imageRight' {
+function slotKey(slot: ImageSlot): 'image' | 'imageBottom' | 'imageLeft' | 'imageRight' {
   return slot === 'top' ? 'image' : slot === 'bottom' ? 'imageBottom' : slot === 'left' ? 'imageLeft' : 'imageRight'
 }
 
@@ -83,12 +83,13 @@ export function slotKey(slot: ImageSlot): 'image' | 'imageBottom' | 'imageLeft' 
  * Every attachment id a node references — the four edge slots AND the cells
  * of a gallery topic (T25).
  *
- * The gallery half is not optional politeness. This function is what
- * `collectUnusedAssets` (src/helpers/assets.ts) treats as the root set of the
- * asset garbage collector: an id missing here is an id no node claims, and
- * the GC deletes the bytes. It is also what the renderer uses to decide which
- * decoded bitmaps may stay in the cache. Both failures are silent and both
- * arrive long after the edit that caused them.
+ * The single answer to "what does a node reference". The asset garbage
+ * collector's root set derives from it — `collectSheetAssetIds`
+ * (src/helpers/assets.ts) calls this per node — so an id missing here is an
+ * id no node claims, and the GC deletes the bytes. A slot added to `Style`
+ * must be added here, or the sweep silently deletes live images long after
+ * the edit that caused it. The gallery half is not optional politeness for
+ * exactly that reason.
  */
 export function nodeImageIds(n: MindNode): string[] {
   const out: string[] = []
@@ -110,7 +111,16 @@ export function cloneNode(n: MindNode): MindNode {
   return {
     ...n,
     childrenIds: [...n.childrenIds],
-    style: { ...n.style },
+    // style is spread, not deep-cloned, EXCEPT the gallery: its cells are
+    // plain objects (and S4 will edit them), so a clone must not share the
+    // live array. A deleted subtree held for undo that aliases the sheet's
+    // gallery would corrupt the sheet the day galleries become editable.
+    style: {
+      ...n.style,
+      ...(n.style.gallery
+        ? { gallery: { ...n.style.gallery, items: n.style.gallery.items.map(item => ({ ...item })) } }
+        : {}),
+    },
     labels: [...n.labels],
     markers: [...n.markers],
     task: n.task ? { ...n.task } : null,
@@ -137,6 +147,10 @@ function clampIndex(i: number, len: number): number {
 function applyOp(sheet: Sheet, op: OpShape): void {
   const nodes = sheet.nodes
   switch (op.type) {
+    // Copy-on-write discipline: ops run on a draft whose node objects are
+    // SHARED with the previously published sheet (draftOf in store.ts), so a
+    // node is cloned before it is mutated in place and the clone replaces the
+    // original. The published sheet is never touched.
     case 'createNode': {
       const parent = op.parentId ? nodes[op.parentId] : undefined
       const node: MindNode = {
@@ -157,7 +171,9 @@ function applyOp(sheet: Sheet, op: OpShape): void {
       }
       nodes[op.id] = node
       if (parent) {
-        parent.childrenIds.splice(clampIndex(op.index, parent.childrenIds.length), 0, op.id)
+        const p = cloneNode(parent)
+        p.childrenIds.splice(clampIndex(op.index, p.childrenIds.length), 0, op.id)
+        nodes[op.parentId] = p
       }
       break
     }
@@ -168,7 +184,9 @@ function applyOp(sheet: Sheet, op: OpShape): void {
       if (op.parentId) {
         const parent = nodes[op.parentId]
         if (parent) {
-          parent.childrenIds.splice(clampIndex(op.index, parent.childrenIds.length), 0, op.id)
+          const p = cloneNode(parent)
+          p.childrenIds.splice(clampIndex(op.index, p.childrenIds.length), 0, op.id)
+          nodes[op.parentId] = p
         }
       }
       for (const rel of op.removedRelationships) {
@@ -183,17 +201,19 @@ function applyOp(sheet: Sheet, op: OpShape): void {
       if (op.parentId) {
         const parent = nodes[op.parentId]
         if (parent) {
-          const idx = parent.childrenIds.indexOf(op.id)
+          const p = cloneNode(parent)
+          const idx = p.childrenIds.indexOf(op.id)
           if (idx >= 0) {
-            parent.childrenIds.splice(idx, 1)
+            p.childrenIds.splice(idx, 1)
           }
+          nodes[op.parentId] = p
         }
       }
       sheet.relationships = sheet.relationships.filter(r => !op.removedRelationships.some(rr => rr.id === r.id))
       break
     }
     case 'setTitle': {
-      const node = nodes[op.id]
+      const node = cloneNode(nodes[op.id])
       node.title = op.title
       // Title and runs are kept in sync on every mutation (see MindNode.title
       // in types.ts): a plain rename must clear any stale styled runs, or the
@@ -204,11 +224,15 @@ function applyOp(sheet: Sheet, op: OpShape): void {
       else {
         delete node.titleRuns
       }
+      nodes[op.id] = node
       break
     }
-    case 'setStyle':
-      nodes[op.id].style = { ...op.style }
+    case 'setStyle': {
+      const node = cloneNode(nodes[op.id])
+      node.style = { ...op.style }
+      nodes[op.id] = node
       break
+    }
     case 'setNodeImage': {
       const node = nodes[op.nodeId]
       if (!node) {
@@ -226,38 +250,54 @@ function applyOp(sheet: Sheet, op: OpShape): void {
       else {
         delete style[key]
       }
-      node.style = style
+      const next = cloneNode(node)
+      next.style = style
+      nodes[op.nodeId] = next
       break
     }
-    case 'setPosition':
-      nodes[op.id].position = { x: op.x, y: op.y, manual: op.manual, offsetX: op.offsetX, offsetY: op.offsetY }
+    case 'setPosition': {
+      const node = cloneNode(nodes[op.id])
+      node.position = { x: op.x, y: op.y, manual: op.manual, offsetX: op.offsetX, offsetY: op.offsetY }
+      nodes[op.id] = node
       break
-    case 'setCollapsed':
-      nodes[op.id].collapsed = op.collapsed
+    }
+    case 'setCollapsed': {
+      const node = cloneNode(nodes[op.id])
+      node.collapsed = op.collapsed
+      nodes[op.id] = node
       break
+    }
     case 'moveNode': {
       // fromIndex/toIndex are FINAL indices: toIndex is the position the node
       // will occupy in the destination array after removal. Producers compute
       // them by simulating removal first, so applyOp needs no adjustment.
-      const fromParent = op.fromParentId ? nodes[op.fromParentId] : undefined
-      const toParent = op.toParentId ? nodes[op.toParentId] : undefined
-      if (!nodes[op.id]) {
+      const moved = nodes[op.id]
+      if (!moved) {
         break
       }
-      if (fromParent) {
-        const idx = fromParent.childrenIds.indexOf(op.id)
+      if (op.fromParentId && nodes[op.fromParentId]) {
+        const from = nodes[op.fromParentId]
+        const idx = from.childrenIds.indexOf(op.id)
         if (idx < 0) {
           break
         }
-        fromParent.childrenIds.splice(idx, 1)
+        const nextFrom = cloneNode(from)
+        nextFrom.childrenIds.splice(idx, 1)
+        nodes[op.fromParentId] = nextFrom
       }
-      else if (nodes[op.id].parentId !== null) {
+      else if (moved.parentId !== null) {
         break
       }
-      if (toParent) {
-        toParent.childrenIds.splice(clampIndex(op.toIndex, toParent.childrenIds.length), 0, op.id)
+      if (op.toParentId && nodes[op.toParentId]) {
+        // Reads the map AFTER the removal above, so a same-parent move
+        // splices into the already-updated clone.
+        const to = cloneNode(nodes[op.toParentId])
+        to.childrenIds.splice(clampIndex(op.toIndex, to.childrenIds.length), 0, op.id)
+        nodes[op.toParentId] = to
       }
-      nodes[op.id].parentId = op.toParentId
+      const nextMoved = cloneNode(moved)
+      nextMoved.parentId = op.toParentId
+      nodes[op.id] = nextMoved
       break
     }
     case 'sortSiblings': {
@@ -265,15 +305,23 @@ function applyOp(sheet: Sheet, op: OpShape): void {
       if (!parent) {
         break
       }
-      parent.childrenIds = [...op.order]
+      const next = cloneNode(parent)
+      next.childrenIds = [...op.order]
+      nodes[op.parentId] = next
       break
     }
-    case 'setTask':
-      nodes[op.id].task = op.task ? { ...op.task } : null
+    case 'setTask': {
+      const node = cloneNode(nodes[op.id])
+      node.task = op.task ? { ...op.task } : null
+      nodes[op.id] = node
       break
-    case 'setNotes':
-      nodes[op.id].notes = op.notes
+    }
+    case 'setNotes': {
+      const node = cloneNode(nodes[op.id])
+      node.notes = op.notes
+      nodes[op.id] = node
       break
+    }
     case 'setSheetTitle':
       sheet.title = op.title
       break

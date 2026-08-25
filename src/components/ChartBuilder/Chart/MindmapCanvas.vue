@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { NodeSize } from '../../../mindmap/layout'
 import type { MindNode } from '../../../mindmap/types'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { cullNodes, sizeKey, type Viewport } from '../../../mindmap/cull'
 import { topicBoxStyle, topicImageBoxStyle } from '../../../mindmap/nodeStyle'
 import { useMindmapStore } from '../../../mindmap/store'
@@ -104,7 +104,11 @@ interface SizeEntry {
   w: number
   h: number
 }
-const sizeCache = ref<Record<string, SizeEntry>>({})
+// One reactive proxy per node is the cost the brief warns about; the cache is
+// a several-hundred-entry record that is always written wholesale (see below),
+// so a shallowRef with replacement matches the discipline used everywhere
+// else — never mutate entries in place.
+const sizeCache = shallowRef<Record<string, SizeEntry>>({})
 
 const unmeasuredNodes = computed<MindNode[]>(() => {
   const c = sizeCache.value
@@ -198,31 +202,45 @@ function ensureFontsReady(): Promise<void> {
 // node and turns a 3,000-topic map into thousands of synchronous layouts.
 // flush: 'post' so the measure layer has painted before its boxes are read.
 async function syncMeasure() {
-  // The web font must have swapped (or be known-absent) before the first box
-  // is read, or the whole first layout runs on fallback metrics.
-  await ensureFontsReady()
-  await nextTick()
-  let changed = false
-  for (const node of unmeasuredNodes.value) {
-    const el = measureEls.value[node.id]
-    if (!el) {
-      continue // not painted yet; the watcher re-runs after the next paint
+  try {
+    // The web font must have swapped (or be known-absent) before the first
+    // box is read, or the whole first layout runs on fallback metrics.
+    await ensureFontsReady()
+    await nextTick()
+    let changed = false
+    for (const node of unmeasuredNodes.value) {
+      const el = measureEls.value[node.id]
+      if (!el) {
+        continue // not painted yet; the watcher re-runs after the next paint
+      }
+      const w = el.offsetWidth
+      const h = el.offsetHeight
+      // Replacement, not in-place: sizeCache is a shallowRef, so a mutated
+      // entry would not retrigger the unmeasuredNodes computed.
+      sizeCache.value = { ...sizeCache.value, [node.id]: { key: sizeKey(node), w, h } }
+      changed = true
     }
-    const w = el.offsetWidth
-    const h = el.offsetHeight
-    sizeCache.value[node.id] = { key: sizeKey(node), w, h }
-    changed = true
+    if (!changed) {
+      return
+    }
+    // Every node now has a real size inside sizeCache (the unmeasured ones
+    // were just read); hand the full record over so layout never guesses.
+    const sizes = sizesForLayout()
+    store.applySizes(sizes)
+    if (unmeasuredNodes.value.length === 0) {
+      emit('settled')
+    }
   }
-  if (!changed) {
-    return
+  catch (error) {
+    // One failed pass must not latch the render gate off: hasLayout would
+    // stay false and the map stays blank for the rest of the session with no
+    // error anywhere. Log it, then let the finally flip the gate on — the
+    // heuristic sizes (and the next watcher pass) cover whatever the pass
+    // missed.
+    console.error('Mindmap measurement pass failed:', error)
   }
-  // Every node now has a real size inside sizeCache (the unmeasured ones were
-  // just read); hand the full record over so layout never guesses.
-  const sizes = sizesForLayout()
-  store.applySizes(sizes)
-  hasLayout.value = true
-  if (unmeasuredNodes.value.length === 0) {
-    emit('settled')
+  finally {
+    hasLayout.value = true
   }
 }
 

@@ -183,6 +183,33 @@ describe('mindmap store — open and history', () => {
     expect(store.selection).toBeNull()
     expect(store.undo()).toBe(false)
   })
+
+  it('close() does not null a sheet that open() swapped in while its flush was in flight', async () => {
+    vi.mocked(readSheet).mockResolvedValue(makeSheet('sB', 'Sheet B'))
+    const store = useMindmapStore()
+    await store.open('sA')
+
+    // Make every flush hang until released, so close() sits mid-await while
+    // open() runs — the switch-map path that does not exist today but must
+    // not corrupt the store the day it does.
+    const releases: Array<() => void> = []
+    vi.mocked(writeSheet).mockImplementation(() => new Promise((resolve) => {
+      releases.push(() => resolve(undefined))
+    }))
+
+    const closing = store.close()
+    const opening = store.open('sB')
+
+    // open()'s flush resolves first: it reads and publishes sB while close()
+    // is still awaiting its own flush.
+    releases[1]()
+    releases[0]()
+    await Promise.all([closing, opening])
+
+    // The guard bailed: the newly opened sheet survived the stale close.
+    expect(store.sheet?.sheetId).toBe('sB')
+    expect(store.sheet).not.toBeNull()
+  })
 })
 
 describe('mindmap store — editing actions', () => {

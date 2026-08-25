@@ -70,13 +70,28 @@ const history = new History()
 // timer LocalStorageWatcher uses.
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 
-// Ops mutate a sheet in place, but the published sheet is replaced, never
-// mutated — the chart store's idiom (MINDMAP_NATIVE_AGENT_BRIEF Lane D). Every
-// edit therefore runs on a fresh clone and publishes that clone; the reference
-// change is what makes Vue's change detection cheap and lets `sheet` stay a
-// shallowRef.
+// The published sheet is replaced, never mutated — the chart store's idiom
+// (MINDMAP_NATIVE_AGENT_BRIEF Lane D). Every edit runs on a draft and
+// publishes it; the reference change is what makes Vue's change detection
+// cheap and lets `sheet` stay a shallowRef.
+//
+// The draft is COPY-ON-WRITE, not a deep clone: node objects and the
+// collection arrays are shared with the published sheet, and applyOp /
+// layoutSheet clone only what an op actually touches (each node at most once
+// per batch). A rename on a 3,000-node map clones one node instead of
+// structuredClone-ing the sheet — the per-keystroke snapshot cost the ops
+// design exists to avoid (see ops.ts). The share is safe because every
+// mutation path replaces before it mutates: nodes go through cloneNode, and
+// the arrays below are the draft's own copies.
 function draftOf(sheet: Sheet): Sheet {
-  return structuredClone(sheet)
+  return {
+    ...sheet,
+    nodes: { ...sheet.nodes },
+    relationships: [...sheet.relationships],
+    boundaries: [...sheet.boundaries],
+    summaries: [...sheet.summaries],
+    attachments: [...sheet.attachments],
+  }
 }
 
 // Pre-order walk of a node and its descendants, exactly as a delete op needs
@@ -218,7 +233,15 @@ export const useMindmapStore = defineStore('mindmap', {
     async close() {
       // The last edit must survive the overlay closing even if its debounce
       // never fired; flush, then drop the sheet.
+      const closingId = this.sheet?.sheetId ?? null
       await this.flushSave()
+      // Generation guard: close() awaits the flush, and nothing today can
+      // swap the sheet while it is in flight (the overlay is modal). The day
+      // a switch-map path exists, an in-flight close must not null the sheet
+      // an open() just put in place — bail if it changed under us.
+      if ((this.sheet?.sheetId ?? null) !== closingId) {
+        return
+      }
       history.clear()
       this.sheet = null
       this.selection = null

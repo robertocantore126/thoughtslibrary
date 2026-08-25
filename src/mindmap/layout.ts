@@ -177,14 +177,22 @@ export function layoutSheet(sheet: Sheet, sizes: Record<string, NodeSize>, force
     if (!n || (!force && n.position.manual)) {
       continue
     }
-    n.position = {
-      x: p.x,
-      y: p.y,
-      // force is the explicit auto-layout command: it takes ownership of the
-      // topic, so the flag it overrode is cleared with it.
-      manual: force ? false : n.position.manual,
-      ...(n.position.offsetX !== undefined ? { offsetX: n.position.offsetX } : {}),
-      ...(n.position.offsetY !== undefined ? { offsetY: n.position.offsetY } : {}),
+    // The sheet handed to layoutSheet may share node objects with a
+    // previously published sheet (draftOf's copy-on-write in store.ts), so a
+    // laid-out node is REPLACED, never mutated in place — the same
+    // replace-before-mutate discipline applyOp follows. A shallow spread is
+    // all that is needed: layout only writes `position`.
+    sheet.nodes[id] = {
+      ...n,
+      position: {
+        x: p.x,
+        y: p.y,
+        // force is the explicit auto-layout command: it takes ownership of the
+        // topic, so the flag it overrode is cleared with it.
+        manual: force ? false : n.position.manual,
+        ...(n.position.offsetX !== undefined ? { offsetX: n.position.offsetX } : {}),
+        ...(n.position.offsetY !== undefined ? { offsetY: n.position.offsetY } : {}),
+      },
     }
   }
 

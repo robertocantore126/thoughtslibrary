@@ -1,5 +1,6 @@
 import type { Sheet, Style } from '../mindmap/types'
 import type { Chart, ChartCoordinates, ChartItem, RelatedLayer, StoredChart } from '../types'
+import { nodeImageIds } from '../mindmap/ops'
 import { readSheet, writeSheet } from '../mindmap/storage'
 import { INLINE_ASSET_BUDGET, optimizeImageBlob, readBlobAsDataUrl, STORED_ASSET_BUDGET } from './files'
 
@@ -372,34 +373,28 @@ export function collectChartAssetIds(chart: Chart | undefined, into: Set<string>
 // topic stores an image, that blob is invisible to collectChartAssetIds, and
 // an invisible reference is deleted ten minutes later.
 //
-// Walks all four image slots and the gallery cells even though S3 authors
-// only the top slot: this is the single source of truth for the question, and
-// the other slots already exist in the schema waiting for S4. Gallery cells
-// carry raw ids rather than URLs, so no prefix to strip there.
+// The per-node enumeration is DELEGATED to nodeImageIds (src/mindmap/ops.ts),
+// the single implementation of "what does a node reference". It walks all
+// four image slots and the gallery cells; keeping a second enumeration here
+// would let the two drift and the sweep delete live images. Slot values are
+// local-asset:// URLs (prefix stripped here) while gallery cells carry raw
+// ids — either way the bare id is what the store keys by, and anything else
+// (a data: URL, a remote URL) never reaches the store.
 export function collectSheetAssetIds(sheet: Sheet | undefined | null, into: Set<string> = new Set()): Set<string> {
   if (!sheet) {
     return into
   }
 
-  const visitStyle = (style?: Style) => {
-    if (!style) {
-      return
-    }
-    for (const url of [style.image, style.imageBottom, style.imageLeft, style.imageRight]) {
-      const id = url ? extractAssetId(url) : null
-      if (id) {
+  for (const node of Object.values(sheet.nodes)) {
+    for (const id of nodeImageIds(node)) {
+      const assetId = extractAssetId(id)
+      if (assetId) {
+        into.add(assetId)
+      }
+      else if (!isDataUrl(id) && !isRemoteHttpUrl(id)) {
         into.add(id)
       }
     }
-    for (const cell of style.gallery?.items ?? []) {
-      if (cell.id) {
-        into.add(cell.id)
-      }
-    }
-  }
-
-  for (const node of Object.values(sheet.nodes)) {
-    visitStyle(node.style)
   }
 
   return into

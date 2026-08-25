@@ -131,3 +131,45 @@ describe('layoutSheet', () => {
     expect(moved.position.manual).toBe(false)
   })
 })
+
+describe('layout — copy-on-write', () => {
+  // draftOf in store.ts is a SHALLOW clone: a new nodes map holding the very
+  // same node objects as the sheet Vue is currently rendering. Layout writing
+  // `position` in place would therefore reach back into the published sheet,
+  // and into any op payload that captured a node's position by reference.
+  // Nothing observes that today, which is exactly why it needs a test: the
+  // in-place version passes every other assertion in this suite.
+  it('replaces laid-out nodes instead of mutating the ones a draft shares', () => {
+    const { sheet, sizes } = buildSheet(24)
+    layoutSheet(sheet, sizes)
+
+    // The published sheet, and a record of where every node sits in it.
+    const publishedNodes = sheet.nodes
+    const publishedPositions = new Map(
+      Object.entries(publishedNodes).map(([id, n]) => [id, { ...n.position }]),
+    )
+
+    // Exactly what the store hands to layout on the next applySizes: a new
+    // map, the same node objects.
+    const draft: Sheet = { ...sheet, nodes: { ...sheet.nodes } }
+
+    // Re-measure one topic much wider, so the pass genuinely moves things.
+    const grown = { ...sizes, n1: { w: MAX_TOPIC_W, h: 160 } }
+    layoutSheet(draft, grown)
+
+    // The draft moved.
+    const moved = Object.keys(draft.nodes).filter(
+      id => draft.nodes[id].position.y !== publishedPositions.get(id)!.y,
+    )
+    expect(moved.length).toBeGreaterThan(0)
+
+    // ...and the published sheet did not, because every laid-out node was
+    // replaced in the draft's map rather than written through.
+    for (const [id, before] of publishedPositions) {
+      expect(publishedNodes[id].position).toEqual(before)
+    }
+    for (const id of moved) {
+      expect(draft.nodes[id]).not.toBe(publishedNodes[id])
+    }
+  })
+})

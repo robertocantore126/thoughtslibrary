@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { History } from '../src/mindmap/history'
-import { applyWithInverse, makeOp } from '../src/mindmap/ops'
+import { applyWithInverse, cloneNode, makeOp, nodeImageIds } from '../src/mindmap/ops'
 import { DEFAULT_STRUCTURE, type MindNode, type Sheet } from '../src/mindmap/types'
 
 function makeNode(id: string, parentId: string | null, title: string, type: MindNode['type']): MindNode {
@@ -305,6 +305,44 @@ describe('applyWithInverse', () => {
     })
   }
 
+  it('mutates only the nodes an op touches (copy-on-write)', () => {
+    const sheet = makeFixture()
+    // Draft-like shallow copy, exactly as the store's draftOf builds it: node
+    // objects shared with the previously published sheet.
+    const draft = {
+      ...sheet,
+      nodes: { ...sheet.nodes },
+      relationships: [...sheet.relationships],
+      boundaries: [...sheet.boundaries],
+      summaries: [...sheet.summaries],
+      attachments: [...sheet.attachments],
+    }
+    // The ops touch only 'a', root and b: 'a' (renamed, collapsed, moved) and
+    // its two parents (childrenIds change). Everything deeper is shared with
+    // the published sheet and must remain the very same object.
+    const untouched = sheet.nodes.a2
+    const untouchedLeaf = sheet.nodes.a2x
+
+    applyWithInverse(draft, makeOp('setTitle', { id: 'a', title: 'Renamed', prev: 'Alpha' }))
+    applyWithInverse(draft, makeOp('setCollapsed', { id: 'a', collapsed: true, prev: false }))
+    applyWithInverse(draft, makeOp('moveNode', { id: 'a', fromParentId: 'root', fromIndex: 0, toParentId: 'b', toIndex: 1 }))
+
+    // Nodes the ops never touched are still the very objects of the sheet the
+    // draft was built from — nothing was mutated in place behind the store's
+    // back, in the draft OR in the published sheet.
+    expect(draft.nodes.a2).toBe(untouched)
+    expect(draft.nodes.a2x).toBe(untouchedLeaf)
+    expect(sheet.nodes.a2).toBe(untouched)
+    expect(sheet.nodes.a2x).toBe(untouchedLeaf)
+    expect(sheet.nodes.a.title).toBe('Alpha')
+    expect(sheet.nodes.a.collapsed).toBe(false)
+    expect(sheet.nodes.a.parentId).toBe('root')
+    expect(sheet.nodes.root.childrenIds).toEqual(['a', 'b'])
+    // The draft saw the move: 'a' left root and now hangs under b.
+    expect(draft.nodes.root.childrenIds).toEqual(['b'])
+    expect(draft.nodes.a.parentId).toBe('b')
+  })
+
   it('deleteNode removes the whole subtree and its inverse restores it, child order included', () => {
     const sheet = makeFixture()
     const before = structuredClone(sheet)
@@ -332,6 +370,45 @@ describe('applyWithInverse', () => {
     expect(sheet.nodes.root.childrenIds).toEqual(['a', 'b'])
     expect(sheet.nodes.a.childrenIds).toEqual(['a1', 'a2'])
     expect(sheet.nodes.a2.childrenIds).toEqual(['a2x'])
+  })
+})
+
+describe('cloneNode', () => {
+  it('deep-copies the gallery so a clone never aliases the source cells', () => {
+    const node = makeNode('a', 'root', 'Alpha', 'main')
+    node.style = { gallery: { items: [{ id: 'img-1', caption: 'one' }] } }
+
+    const clone = cloneNode(node)
+    expect(clone.style.gallery?.items[0]).toEqual({ id: 'img-1', caption: 'one' })
+    expect(clone.style.gallery).not.toBe(node.style.gallery)
+    expect(clone.style.gallery?.items[0]).not.toBe(node.style.gallery?.items[0])
+
+    // Mutating the clone's cell must not touch the source — the aliasing that
+    // would corrupt a sheet the day S4 makes galleries editable.
+    clone.style.gallery!.items[0].caption = 'changed'
+    expect(node.style.gallery!.items[0].caption).toBe('one')
+  })
+})
+
+describe('nodeImageIds', () => {
+  it('lists the four image slots plus the gallery cells', () => {
+    const node = makeNode('a', 'root', 'Alpha', 'main')
+    node.style = {
+      image: 'local-asset://aaa',
+      imageBottom: 'local-asset://bbb',
+      imageLeft: 'local-asset://ccc',
+      imageRight: 'local-asset://ddd',
+      gallery: { items: [{ id: 'g1' }, { id: 'g2' }] },
+    }
+
+    expect(nodeImageIds(node).sort()).toEqual([
+      'g1',
+      'g2',
+      'local-asset://aaa',
+      'local-asset://bbb',
+      'local-asset://ccc',
+      'local-asset://ddd',
+    ])
   })
 })
 
