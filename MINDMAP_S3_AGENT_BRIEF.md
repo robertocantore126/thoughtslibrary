@@ -142,12 +142,42 @@ S3 covers `Style.image` only — the single top image. The other three slots
 (`imageBottom`, `imageLeft`, `imageRight`) and `Style.gallery` are S4. The
 fields stay in the schema untouched.
 
-## C.2 Sizing — do not measure images from the DOM
+## C.2 Sizing — the async-input rule
+
+**A layout input must be knowable without waiting for anything async.** This is
+one rule with two instances, and it is the same failure as the S2 pan-shift
+bug arriving by two more roads. Both must be closed in S3.
+
+### C.2a Fonts — a live bug, already shipped
+
+`index.html` loads Google Fonts with `display=swap`:
+
+```html
+<link href="https://fonts.googleapis.com/css2?family=Nunito&display=swap" rel="stylesheet">
+```
+
+`swap` means the browser paints a fallback face first and switches to Nunito
+when it arrives. Every measurement taken before that switch uses the wrong
+metrics, and **nothing currently re-measures afterwards** — so S2's measure
+layer already sizes topics for the wrong font on a cold load and the right one
+on a warm cache. Intermittent, environment-dependent, and invisible in tests.
+
+Fix in `MindmapCanvas.vue`:
+
+- `await document.fonts.ready` before the first measurement pass.
+- Re-run the measurement pass once on `document.fonts.onloadingdone`, since a
+  face can arrive after `ready` resolves when a new family is requested later.
+- Guard both: `document.fonts` is absent in the node test environment, so treat
+  a missing API as "fonts are ready".
+
+This is not image work, but it lives here because it is the same rule and
+because fixing it separately would mean touching the measure layer twice.
+
+### C.2b Images
 
 An `<img>` measured before it loads is zero-height. Measure the node then and
 layout packs the tree around a collapsed box; the image arrives, the box grows,
-and the map jumps. This is the same failure as the S2 pan-shift bug, arriving
-by a different road.
+and the map jumps.
 
 So the box must be computable **without** the image being loaded:
 
@@ -222,7 +252,12 @@ file-handle logic; do not restructure it.
 **5. Do not reintroduce `.rnode` import.** Built in S2 and deliberately removed.
 Mindmaps are authored here.
 
-**6. Do not touch `src/mindmap/layout.ts`, `ops.ts`, `history.ts`, `geometry.ts`
+**6. The font fix is not optional and not cosmetic.** C.2a is a bug that is
+already live: measurement runs before the web font swaps, so topic sizes depend
+on whether the font was cached. It is two lines of `document.fonts.ready` and
+it removes an entire class of "it looks different on my machine".
+
+**7. Do not touch `src/mindmap/layout.ts`, `ops.ts`, `history.ts`, `geometry.ts`
 or `cull.ts`.** Landed and tested. If one genuinely needs a change, say so in
 your final message rather than making it.
 
@@ -253,5 +288,8 @@ your final message rather than making it.
 - After a normal editing session the `charts` localStorage key holds ids only —
   no sheet content, no data URIs.
 - Adding an image, then Ctrl+Z, removes it.
+- **Cold-load font check:** hard-reload with the cache disabled and confirm a
+  map's topic boxes are sized identically to a warm reload. Different sizes
+  mean C.2a is not done.
 
 If a step cannot be completed, say so plainly with what you tried.
