@@ -1,151 +1,257 @@
-# Task: put mindmaps inside the chart's saved JSON
+# Task: mindmaps in the saved JSON, and images in topics
 
-Stage 3 of the mindmap work. One job. Read §0.3 and §T of
+Stage 3 of the mindmap work. Read §0.3 and §T of
 `MINDMAP_NATIVE_AGENT_BRIEF.md` first; both still apply.
 
-## The bug this fixes
+Three things, in this order, and the order is not negotiable — see §Order.
+
+**A.** The saved chart JSON carries mindmap sheets. (Fixes live data loss.)
+**B.** The orphan sweep learns about mindmaps. (Must land *before* C.)
+**C.** Topics can carry an image, and it travels in the save file.
+
+---
+
+# Part A — the saved JSON carries mindmaps
+
+## A.0 The bug
 
 `Chart.mindmaps` holds `{ chartItemId: sheetId }` — uuid strings. The sheets
-themselves live in the `thoughtslibrary-mindmaps` IndexedDB database. Nothing
-in `src/helpers/imports.ts`, `src/helpers/assets.ts` or
+live in the `thoughtslibrary-mindmaps` IndexedDB database. Nothing in
+`src/helpers/imports.ts`, `src/helpers/assets.ts` or
 `src/helpers/localStorage.ts` reads them.
 
 So **every chart exported or saved to a file today contains no mindmap content
 at all** — only ids pointing at records that never leave the machine. Open that
-file anywhere else and every map is gone, with no error: the tile still shows
-its mindmap indicator, the overlay opens, and the map is empty.
+file anywhere else and each tile still shows its mindmap indicator, the overlay
+still opens, and the map is empty. Silent data loss, live right now.
 
-That is silent data loss on the save path, and it is live right now.
+## A.1 The rule
 
-## The rule
-
-The same one tile covers already follow, and it is not negotiable in either
-direction:
+The same one tile covers already follow, in both directions:
 
 | | Live (localStorage + IndexedDB) | Exported / saved file |
 |---|---|---|
 | Tile covers | `local-asset://<id>` | data URI, inlined |
 | Mindmap sheets | sheet id → IndexedDB | **inlined — this task** |
+| Mindmap images | `local-asset://<id>` | data URI, inlined — Part C |
 
 **Sheets must never go into localStorage.** A chart lives there under the
 `charts` key, and one 400-topic map would eat the quota — quietly, because
 `isStorageQuotaExceeded` in `LocalStorageWatcher.vue` catches the failure and
-the user simply stops getting saves. Out-of-line while live, inline in the
-file. That distinction is the whole design.
+the user simply stops getting saves.
 
-## Where the code goes
+## A.2 Schema
 
-Both export paths already funnel through one function, and both import paths
-through its mirror. Use them; do not add new choke points.
-
-- **Export** — `inlineStoredChartAssets` (`src/helpers/assets.ts`), called from
-  `exportCurrentChart` (`src/helpers/imports.ts:130`) and
-  `saveCurrentChartToFile` / `saveCurrentChartAs` (`:558`).
-- **Import** — `persistChartAssets`, called from `importChart`
-  (`src/helpers/imports.ts:734`, `:917`) and from `LocalStorageWatcher.vue:135`.
-
-That last caller is the dangerous one. See trap 1.
-
-## M1. Schema
-
-One field on `Chart` in `src/types.ts`, beside the existing `mindmaps`:
+On `Chart` in `src/types.ts`, beside `mindmaps`:
 
 ```ts
   // Present ONLY in an exported or file-saved chart, never in localStorage:
-  // the sheets themselves, keyed by the sheet ids that `mindmaps` points at.
-  // Out-of-line while live, inline in the file — the same rule the tile
-  // covers follow, and for the same reason: a file has to open on a machine
-  // that has never seen this one.
+  // the sheets themselves, keyed by the ids `mindmaps` points at. Out-of-line
+  // while live, inline in the file — the same rule the tile covers follow,
+  // because a file has to open on a machine that has never seen this one.
   mindmapSheets?: Record<string, Sheet>
 ```
 
-## M2. Export — inline
+## A.3 Export — inline
 
-In `src/helpers/assets.ts`, alongside the existing cover inlining: read every
-sheet named in `chart.mindmaps` out of the mindmap store and attach them as
+Both export paths funnel through `inlineStoredChartAssets`
+(`src/helpers/assets.ts`), called from `exportCurrentChart`
+(`src/helpers/imports.ts:130`) and `saveCurrentChartToFile` /
+`saveCurrentChartAs` (`:558`). Use it; do not add a second choke point.
+
+Read every sheet named in `chart.mindmaps` and attach them as
 `chart.mindmapSheets`.
 
-- A `mindmaps` entry whose sheet is missing from IndexedDB is **skipped, not
-  fatal**. Drop the `mindmaps` entry too, so the file never references a sheet
-  it does not carry — a dangling id is what created this bug in the first
-  place.
-- Do not mutate the live chart. The existing helpers clone (`cloneItems`,
-  `cloneCoordinates`); follow that.
+A `mindmaps` entry whose sheet is missing from IndexedDB is **skipped, not
+fatal** — and drop the `mindmaps` entry with it, so the file never references a
+sheet it does not carry. A dangling id is what created this bug.
 
-## M3. Import — restore
+Do not mutate the live chart; the existing helpers clone (`cloneItems`,
+`cloneCoordinates`). Follow that.
 
-In `persistChartAssets`, the reverse: for each entry in `mindmapSheets`, write
-the sheet under a **freshly generated id**, rewrite `chart.mindmaps` to point
-at the new id, and delete `mindmapSheets` from the chart before it goes any
-further.
+## A.4 Import — restore
+
+`persistChartAssets` is the mirror, called from `importChart`
+(`src/helpers/imports.ts:734`, `:917`) **and from
+`LocalStorageWatcher.vue:135` on every autosave** — see trap 1.
+
+For each entry in `mindmapSheets`: write the sheet under a **freshly generated
+id**, rewrite `chart.mindmaps` to point at it, and delete `mindmapSheets`
+before the chart goes any further.
 
 Sheet ids are per-machine IndexedDB keys, not content addresses. Importing the
-same file twice, or importing someone else's, must produce new ids — otherwise
-the second import overwrites the first one's maps and the user loses a map by
-opening a file.
+same file twice must produce new ids, or the second import overwrites the
+first one's maps and the user loses a map by opening a file.
 
-## M4. Tests — `tests/mindmap-save.test.ts`
+---
 
-Through `fake-indexeddb`:
+# Part B — teach the orphan sweep about mindmaps
 
-1. **Round trip.** A chart with two mindmaps → export → clear both IndexedDB
-   databases → import → both maps open with their original topics. This is the
-   whole point of the task; write it first.
-2. **Shared nothing.** The imported chart's `mindmaps` ids differ from the
-   exported file's, and both maps still resolve.
-3. **Double import.** Importing the same file twice yields two independent
-   charts; editing one does not change the other.
-4. **Dangling id.** A chart whose `mindmaps` names a sheet not in the store
-   exports without that entry, and imports without error.
-5. **`mindmapSheets` never survives into the store.** After import, the chart
-   handed to pinia has no `mindmapSheets` key.
+**Do this before Part C. Not after, not alongside.**
+
+`collectUnusedAssets` in `src/helpers/assets.ts` deletes every blob in the
+asset store that no chart references and that is older than a ten-minute grace
+period. Its root set comes from `collectChartAssetIds`, which walks
+`chart.items`, `chart.coordinates` and `chart.relatedLayers` — **and nothing
+else.**
+
+The moment a mindmap topic stores an image as `local-asset://…`, that blob is
+invisible to the root set, and roughly ten minutes later the sweep deletes it.
+The map keeps the reference; the bytes are gone. Ship Part C without Part B and
+you have built an image feature that destroys its own images on a timer.
+
+The fix, at the call site in `LocalStorageWatcher.vue:170`:
+
+- The root set must also include every asset referenced by every sheet of every
+  stored chart — not just the active one. `chart.mindmaps` gives the sheet ids;
+  read each sheet and collect its image references.
+- The gather is async and the call site already is; that is fine.
+- **Extend the existing bail-out, do not weaken it.** The code already refuses
+  to sweep when any chart fails to read: *"a sweep that cannot see a chart's
+  references would delete its images. Better to reclaim nothing this run than
+  to collect against an incomplete root set."* A sheet that fails to read is
+  exactly the same hazard. Same guard, same reason.
+
+Add a `collectSheetAssetIds(sheet, into)` next to `collectChartAssetIds` so
+there is one place that answers "what does a sheet reference", the way
+`referencedAssetIds` does in r-node.
+
+**Test it as a deletion test, not a collection test.** Store an image on a
+mindmap topic, run the sweep with the grace period bypassed, and assert the
+blob is *still there*. A test that only checks that unreferenced blobs get
+collected will pass while this bug is present.
+
+---
+
+# Part C — images in topics
+
+## C.1 Use the asset store you already have
+
+`src/helpers/assets.ts` — `storeLocalImage`, `resolveStoredImageUrl`,
+`persistImageUrl`, `inlineStoredImageUrl`, `isLocalAssetUrl`. Do **not** build a
+second image path for mindmaps (§T.7). One asset store, one orphan sweep, one
+export path.
+
+`Style.image` therefore holds a `local-asset://<uuid>` URL, the same convention
+as `ChartItem.coverURL` — **not** r-node's SHA-256 asset id. That is a
+deliberate divergence from the ported schema: r-node content-addresses because
+it owns its own store; here the host's store already exists and already has a
+URL convention. Write the reason in a comment where the field is first read.
+
+S3 covers `Style.image` only — the single top image. The other three slots
+(`imageBottom`, `imageLeft`, `imageRight`) and `Style.gallery` are S4. The
+fields stay in the schema untouched.
+
+## C.2 Sizing — do not measure images from the DOM
+
+An `<img>` measured before it loads is zero-height. Measure the node then and
+layout packs the tree around a collapsed box; the image arrives, the box grows,
+and the map jumps. This is the same failure as the S2 pan-shift bug, arriving
+by a different road.
+
+So the box must be computable **without** the image being loaded:
+
+- `Style.imageWidth` — display width in world units (already in the schema).
+- Add `imageAspect?: number` to `Style` — height / width of the source.
+  r-node does not need this because its `AssetMeta` carries `w`/`h`; this
+  repo's asset store keeps only the blob and a write timestamp, so the aspect
+  has to live on the node. Document that reason at the field.
+
+Read the natural dimensions **once, when the image is added**, and store the
+aspect then. Render the `<img>` with an explicit width and height derived from
+those two numbers, so the box is correct on the first frame and never changes
+on load.
+
+Add `imageWidth` and `imageAspect` to `sizeKey` (S2 M1.2) so resizing an image
+re-measures the topic.
+
+## C.3 Editing
+
+In the inspector (S2 M3): add an image, replace it, remove it, and a width
+control.
+
+Every one of those is an op through `setNodeStyle` / `clearNodeStyle`, so
+**Ctrl+Z undoes adding or removing an image**. Removing clears `image`,
+`imageWidth` and `imageAspect` together — a leftover aspect on a node with no
+image is a trap for whatever reads it next.
+
+Drag-and-drop onto a topic is welcome if it falls out cheaply; this repo
+already has `src/helpers/imageDrop.ts`. Do not rebuild it.
+
+## C.4 Images in the save file
+
+Extend A.3 and A.4 to carry the bytes, keyed by asset id and shared across
+every sheet in the chart so a picture used by two maps travels once:
+
+```ts
+  // assetId → data: URI. Export-only, like mindmapSheets.
+  mindmapAssets?: Record<string, string>
+```
+
+- **Export**: for every sheet being inlined, collect its image ids and
+  `inlineStoredImageUrl` each into `mindmapAssets`.
+- **Import**: write each back through the asset store, rewrite the sheets'
+  `Style.image` URLs to the new local ids, then delete `mindmapAssets`.
+- Missing bytes are skipped, not fatal — count them and leave the reference
+  alone rather than corrupting the sheet.
 
 ---
 
 # Traps
 
-**1. `persistChartAssets` also runs on every autosave.** `LocalStorageWatcher.vue:135`
-calls it on the debounced write to localStorage — not just on file import. If
-your restore logic runs there, it will rewrite sheet ids on every keystroke and
-re-key the user's maps continuously. **Gate the restore on the presence of
-`mindmapSheets`**, which only a file ever carries, and make sure the autosave
-path leaves `mindmaps` untouched. Write test 5 before you write the code.
+**1. `persistChartAssets` runs on every autosave.** `LocalStorageWatcher.vue:135`
+calls it on the debounced write to localStorage, not only on file import. If the
+restore logic runs there it will re-key sheet ids on every keystroke. **Gate the
+restore on `mindmapSheets` being present** — only a file ever carries it — and
+make sure the autosave path leaves `mindmaps` untouched. Write the test for this
+before the code.
 
-**2. Never let `mindmapSheets` reach localStorage.** It must be stripped in M3
-before the chart reaches the pinia store, and never added by the autosave path.
-Verify by hand: build a map, wait for autosave, and inspect the `charts` key —
+**2. Never let `mindmapSheets` or `mindmapAssets` reach localStorage.** Both are
+stripped on import, and neither is ever added by the autosave path. Verify by
+hand: build a map with an image, wait for autosave, inspect the `charts` key —
 it must hold ids only.
 
-**3. Images inside mindmaps are out of scope.** S1–S2 mindmaps carry no images
-yet. When they do, they will need the same inlining, and the field for it
-(`mindmapAssets`, keyed by asset id, shared across sheets so a picture used by
-two maps travels once) is already designed — but do not build it now, and do
-not stub it.
+**3. Part B before Part C.** Stated above and worth repeating: images that the
+sweep cannot see are deleted ten minutes after they are created.
 
-**4. The save path is where this repo has been burned before.** `git log` shows
+**4. The save path is where this repo has been burned.** `git log` shows
 `fix/save-safety` and "Stop losing charts, files and images on the save paths".
-Read those commits before touching `imports.ts`. Do not restructure the
-write-through or the file-handle logic; add to it.
+Read those commits before touching `imports.ts`. Add to the write-through and
+file-handle logic; do not restructure it.
 
-**5. Do not reintroduce `.rnode` import.** It was built in S2 and deliberately
-removed — the user does not want it. Mindmaps are authored in thoughtslibrary.
+**5. Do not reintroduce `.rnode` import.** Built in S2 and deliberately removed.
+Mindmaps are authored here.
+
+**6. Do not touch `src/mindmap/layout.ts`, `ops.ts`, `history.ts`, `geometry.ts`
+or `cull.ts`.** Landed and tested. If one genuinely needs a change, say so in
+your final message rather than making it.
 
 ---
+
+# Order
+
+1. **Part A** — sheets in the file, with its tests. Self-contained, and it stops
+   the live data loss.
+2. **Part B** — the sweep. No images exist yet, so nothing is at risk while you
+   write it, and the test can use a hand-placed reference.
+3. **Part C** — images, last, onto a sweep that already protects them.
 
 # Definition of done
 
 - `npm run lint`, `npm run build`, `npm test` green.
-- **The portability test, by hand:** build a chart with two mindmaps, save it
-  to a file, then open the app in a **fresh browser profile** (or delete the
-  `thoughtslibrary-mindmaps` and `thoughtslibrary-assets` databases, which is
-  the same thing and faster) and import the file. Both maps open with their
-  topics intact.
+- **The portability test, by hand, in a clean profile.** Build a chart with two
+  mindmaps, put an image on a topic in each, save to a file. Then delete the
+  `thoughtslibrary-mindmaps` and `thoughtslibrary-assets` databases — or open a
+  fresh browser profile — and import. Both maps open with their topics and both
+  images.
 
-  A clean profile is not optional. The failure this guards against is an export
-  that looks complete only because the exporting machine still has the sheets
-  in IndexedDB, and testing on that machine cannot tell a working file from a
-  broken one.
-- The `charts` localStorage key contains sheet **ids**, never sheet content,
-  after a normal editing session.
+  A clean profile is not optional. An export missing its sheets or its bytes
+  looks perfect on the machine that made it, because they are still in
+  IndexedDB. Testing there cannot distinguish a working file from a broken one.
+- **The sweep test:** an image on a mindmap topic survives a sweep run with the
+  grace period bypassed.
+- After a normal editing session the `charts` localStorage key holds ids only —
+  no sheet content, no data URIs.
+- Adding an image, then Ctrl+Z, removes it.
 
 If a step cannot be completed, say so plainly with what you tried.
