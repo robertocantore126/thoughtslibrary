@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ComputedRef, CSSProperties } from 'vue'
 import type { ChartItem } from '../../../types'
-import { BIconDiagram3, BIconX } from 'bootstrap-icons-vue'
+import { BIconX } from 'bootstrap-icons-vue'
 import { v4 as uuidv4 } from 'uuid'
 import { computed } from 'vue'
 import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
@@ -257,17 +257,6 @@ function handleContextMenu() {
 function deleteItem() {
   store.addItem({ item: null, index: props.index })
 }
-
-// The entry point that opens a mindmap for this grid tile, following how the
-// notes popup is opened: select the tile first, then open — openMindmap reads
-// the selection. Related-layer tiles never carry a mindmap (Lane F).
-function openMindmap() {
-  if (!props.item) {
-    return
-  }
-  store.selectTile(tileCoordinates.value)
-  store.openMindmap()
-}
 </script>
 
 <template>
@@ -322,15 +311,6 @@ function openMindmap() {
         @click.stop="deleteItem"
       >
         <BIconX />
-      </button>
-      <button
-        v-if="props.item"
-        class="mindmap-button"
-        data-html2canvas-ignore
-        :title="hasMindmap ? 'Open mindmap' : 'New mindmap'"
-        @click.stop="openMindmap"
-      >
-        <BIconDiagram3 />
       </button>
       <img
         v-if="item"
@@ -490,38 +470,6 @@ function openMindmap() {
   display: initial;
 }
 
-.mindmap-button {
-  /* Beside the delete button, which owns the top-right corner. */
-  display: none;
-  position: absolute;
-  top: 5px;
-  right: 38px;
-  height: 30px;
-  width: 30px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  appearance: none;
-  background-color: rgba(0, 0, 0, 0.6);
-  border-radius: 5px;
-  color: #ffffff;
-  border: none;
-  cursor: pointer;
-}
-
-.mindmap-button:hover {
-  cursor: pointer;
-}
-
-.mindmap-button svg {
-  height: 100%;
-  width: 100%;
-}
-
-.item:hover .mindmap-button {
-  display: flex;
-}
-
 .placeholder {
   background-color: rgba(90, 90, 90, 0.6);
   touch-action: auto;
@@ -545,10 +493,6 @@ function openMindmap() {
 @media (hover: none) {
   .delete-button {
     display: initial;
-  }
-
-  .mindmap-button {
-    display: flex;
   }
 }
 </style>

@@ -73,5 +73,10 @@ DEFAULT_STYLE.padding is the inspector-facing default, not this render inset.)
 .mindmap-node-image {
     max-width: none;
     border-radius: 6px;
-    pointer-events: none;
+    /* The image is selectable: a click on it selects the image ref (Delete
+       then removes the picture, not the topic). pointer-events:auto lets the
+       click and the right-click reach the img instead of passing through to
+       the node — a pointerdown on it still starts the topic drag, because the
+       drag delegation resolves `[data-node-id]` from the nearest ancestor. */
+    pointer-events: auto;
 }

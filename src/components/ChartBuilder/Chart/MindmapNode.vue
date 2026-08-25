@@ -42,6 +42,24 @@ const store = useMindmapStore()
 
 const isSelected = computed(() => store.isSelected({ kind: 'node', id: props.node.id }))
 
+// The topic's IMAGE can be selected on its own: clicking the picture selects
+// `{ kind: 'image', id: node.id }` instead of the node, so Delete (and the ✕
+// button) remove just the image while the topic stays put. The image carries
+// the same id as its owning node — the ref is alive only while the node has
+// one (store.publish / refExists).
+const isImageSelected = computed(() => store.isSelected({ kind: 'image', id: props.node.id }))
+
+function onImageClick() {
+  store.select({ kind: 'image', id: props.node.id })
+}
+
+function deleteImage() {
+  store.removeNodeImage(props.node.id)
+  // The image ref dies with the image (alive filter); hand the selection back
+  // to the topic so the user is left looking at the thing that still exists.
+  store.select({ kind: 'node', id: props.node.id })
+}
+
 // Live box size while a resize handle is dragged. Written on every pointermove,
 // committed to the store once on pointerup (see onResizeEnd). Undefined fields
 // mean "follow the natural size", so an untouched axis stays auto.
@@ -633,6 +651,17 @@ const imageHandlePos = computed(() => {
   return { left: `${pad + w}px`, top: `${pad + h}px` }
 })
 
+/** Where the ✕ delete button sits: the image box's top-right corner. */
+const imageDeletePos = computed(() => {
+  if (!hasImage.value) {
+    return undefined
+  }
+  const s = props.node.style
+  const w = Math.max(1, Math.round(imageResizeLive.value ?? s.imageWidth ?? 120))
+  const pad = s.padding ?? 6
+  return { left: `${pad + w - 8}px`, top: `${pad - 8}px` }
+})
+
 function onImageResizeStart(event: PointerEvent) {
   if (!hasImage.value) {
     return
@@ -700,7 +729,13 @@ function onImageResizeEnd(event: PointerEvent) {
     @click="onNodeClick"
     @dblclick="onNodeDblclick"
   >
-    <MindmapTopicContent :node="props.node" :hide-title="editing" :image-width="imageResizeLive" />
+    <MindmapTopicContent
+      :node="props.node"
+      :hide-title="editing"
+      :image-width="imageResizeLive"
+      :image-selected="isImageSelected"
+      @image-click="onImageClick"
+    />
     <div
       v-if="editing"
       ref="editor"
@@ -747,17 +782,31 @@ function onImageResizeEnd(event: PointerEvent) {
       title="Drag to resize"
       @pointerdown.stop.prevent="onResizeStart('se', $event)"
     />
-    <!-- Image resize handle: bottom-right corner of the topic's image, only on
-    a selected topic that HAS an image (r-node parity — the image is resized
-    by a handle, keeping its aspect). Shares .mindmap-resize-handle so
+    <!-- Image resize handle: bottom-right corner of the topic's image, shown
+    when the topic OR its image is selected (r-node parity — the image is
+    resized by a handle, keeping its aspect). Shares .mindmap-resize-handle so
     MindmapInteraction's drag delegation skips it like the box handles. -->
     <span
-      v-if="isSelected && !editing && hasImage"
+      v-if="(isSelected || isImageSelected) && !editing && hasImage"
       class="mindmap-resize-handle mindmap-image-handle"
       title="Drag to resize the image"
       :style="imageHandlePos"
       @pointerdown.stop.prevent="onImageResizeStart($event)"
     />
+    <!-- Delete the image without touching the topic: shown on the image's
+    top-right corner while the image is selected. One removeNodeImage op, so
+    Ctrl+Z brings the picture back. MindmapInteraction's drag delegation
+    skips .mindmap-image-delete like the resize handles. -->
+    <button
+      v-if="isImageSelected && !editing && hasImage"
+      class="mindmap-image-delete"
+      title="Remove the image (Ctrl+Z restores it)"
+      :style="imageDeletePos"
+      @pointerdown.stop.prevent
+      @click.stop="deleteImage"
+    >
+      ✕
+    </button>
   </div>
 </template>
 
@@ -861,5 +910,31 @@ function onImageResizeEnd(event: PointerEvent) {
   transform: translate(-50%, -50%);
   cursor: nwse-resize;
   z-index: 4;
+}
+
+/* The image's delete button, over its top-right corner. Owns its pointer like
+   a resize handle; MindmapInteraction skips it in the drag delegation. */
+.mindmap-image-delete {
+  position: absolute;
+  z-index: 4;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1.5px solid #ff7f50;
+  background: rgba(255, 255, 255, 0.95);
+  color: #ff7f50;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.mindmap-image-delete:hover {
+  background: #ff7f50;
+  color: #fff;
 }
 </style>

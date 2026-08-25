@@ -36,6 +36,18 @@ const props = defineProps<{
    * never passes it, so it always sizes from the stored Style numbers.
    */
   imageWidth?: number
+  /**
+   * The live topic's image is selected ({ kind: 'image', id: node.id }): the
+   * measure layer never paints a selection, so it never passes this.
+   */
+  imageSelected?: boolean
+}>()
+
+// The image is itself selectable (MindmapNode listens): clicking it selects
+// the image ref, so Delete removes just the picture, not the topic. The
+// measure layer never gets a click, so the emit is inert there.
+const emit = defineEmits<{
+  imageClick: []
 }>()
 
 const imageBox = computed(() => topicImageBoxStyle(props.node, props.imageWidth))
@@ -93,10 +105,13 @@ function paraStyle(para: RunParagraph): Record<string, string> | undefined {
   <img
     v-if="imageBox"
     class="mindmap-node-image"
+    :class="{ selected: props.imageSelected }"
     :src="props.measuring ? undefined : resolvedImage"
     :style="imageBox"
     alt=""
     draggable="false"
+    @click.stop="emit('imageClick')"
+    @dblclick.stop
   >
   <template v-if="!props.hideTitle">
     <span v-if="!paragraphs" class="mindmap-node-title">{{ props.node.title }}</span>
@@ -148,5 +163,16 @@ function paraStyle(para: RunParagraph): Record<string, string> | undefined {
    depth (listIndentPx) so wrapped lines align under the text. */
 .mindmap-para.bullet::before {
   content: '• ';
+}
+
+/* The image's own selection outline — distinct from the topic's (dashed vs
+   solid) so it reads as "the picture, not the box". The box-affecting
+   .mindmap-node-image base (width/height/radius) stays in global.css; this
+   selection ring is chrome on top, exactly like the node outline in
+   MindmapNode.vue. */
+.mindmap-node-image.selected {
+  outline: 2px dashed #ff7f50;
+  outline-offset: 1px;
+  cursor: default;
 }
 </style>

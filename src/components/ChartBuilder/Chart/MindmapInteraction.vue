@@ -47,8 +47,12 @@ interface DropIndicator extends DropPlacement {
 /** Where a drag would land, shown until pointerup. */
 const dropIndicator = ref<DropIndicator | null>(null)
 
-/** The right-click menu, positioned in canvas-screen coordinates. */
-const contextMenu = ref<{ x: number, y: number, nodeId: string } | null>(null)
+/**
+ * The right-click menu, positioned in canvas-screen coordinates. `kind` is
+ * what the menu acts on: the topic (`node`) or its image — an image menu only
+ * offers removing the picture, never the topic commands.
+ */
+const contextMenu = ref<{ x: number, y: number, nodeId: string, kind: 'node' | 'image' } | null>(null)
 
 // ---------------------------------------------------------------------------
 // Screen ↔ world
@@ -225,7 +229,8 @@ function dispatch(command: Command, key: string) {
 }
 
 // Delete acts on the PRIMARY selection's kind: a topic deletes its subtree,
-// a relationship deletes the relationship, a boundary deletes the boundary.
+// a relationship deletes the relationship, a boundary deletes the boundary,
+// and an IMAGE clears the image fields while the topic stays put.
 function deletePrimary() {
   const selection = store.selection
   const primary = selection[selection.length - 1]
@@ -238,6 +243,13 @@ function deletePrimary() {
   }
   else if (primary.kind === 'relationship') {
     removeRelationship(store, primary.id)
+  }
+  else if (primary.kind === 'image') {
+    const nodeId = primary.id
+    store.removeNodeImage(nodeId)
+    // The image ref dies with the image (the alive filter drops it on the
+    // same commit); hand the selection back to the topic that still exists.
+    store.select({ kind: 'node', id: nodeId })
   }
   else {
     removeGroup(store, primary.id)
@@ -357,8 +369,9 @@ function onPointerDown(event: PointerEvent) {
     return
   }
   // A node's resize handles (MindmapNode) own their pointer: the drag system
-  // must not steal a pointerdown meant to grow a box.
-  if (target.closest?.('.mindmap-resize-handle')) {
+  // must not steal a pointerdown meant to grow a box. The image's ✕ delete
+  // button owns its pointer the same way.
+  if (target.closest?.('.mindmap-resize-handle, .mindmap-image-delete')) {
     return
   }
   // A plain LEFT click on empty ground clears the selection. Panning no longer
@@ -716,16 +729,24 @@ function onContextMenu(event: MouseEvent) {
     contextMenu.value = null
     return
   }
-  // The menu acts on the topic it opened on; select it so its commands and
-  // the Delete key agree about what "the selection" is.
-  store.select({ kind: 'node', id: nodeId })
+  // A right-click on the IMAGE (the node's selectable picture) opens the
+  // image menu; anywhere else on the topic opens the topic menu. Either way
+  // the selection moves to what was clicked, so the menu's commands and the
+  // Delete key agree about what "the selection" is.
+  const onImage = !!target.closest?.('.mindmap-node-image') && !!sheet.nodes[nodeId].style.image
+  store.select(onImage ? { kind: 'image', id: nodeId } : { kind: 'node', id: nodeId })
   event.preventDefault()
   event.stopPropagation()
   const rect = root.value?.getBoundingClientRect()
   if (!rect) {
     return
   }
-  contextMenu.value = { x: event.clientX - rect.left, y: event.clientY - rect.top, nodeId }
+  contextMenu.value = {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+    nodeId,
+    kind: onImage ? 'image' : 'node',
+  }
 }
 
 function menuCommand(action: (nodeId: string) => void) {
@@ -792,6 +813,13 @@ function menuDelete() {
   })
 }
 
+function menuDeleteImage() {
+  menuCommand((nodeId) => {
+    store.removeNodeImage(nodeId)
+    store.select({ kind: 'node', id: nodeId })
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -842,24 +870,31 @@ onUnmounted(() => {
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       role="menu"
     >
-      <button role="menuitem" @click="menuAddChild">
-        Add child
-      </button>
-      <button role="menuitem" @click="menuAddSibling">
-        Add sibling
-      </button>
-      <button role="menuitem" @click="menuDuplicate">
-        Duplicate
-      </button>
-      <button role="menuitem" @click="menuCreateParent">
-        Create parent
-      </button>
-      <button role="menuitem" @click="menuExpandAll">
-        Expand all
-      </button>
-      <button role="menuitem" @click="menuDelete">
-        Delete
-      </button>
+      <template v-if="contextMenu?.kind === 'node'">
+        <button role="menuitem" @click="menuAddChild">
+          Add child
+        </button>
+        <button role="menuitem" @click="menuAddSibling">
+          Add sibling
+        </button>
+        <button role="menuitem" @click="menuDuplicate">
+          Duplicate
+        </button>
+        <button role="menuitem" @click="menuCreateParent">
+          Create parent
+        </button>
+        <button role="menuitem" @click="menuExpandAll">
+          Expand all
+        </button>
+        <button role="menuitem" @click="menuDelete">
+          Delete
+        </button>
+      </template>
+      <template v-else>
+        <button role="menuitem" @click="menuDeleteImage">
+          Delete image
+        </button>
+      </template>
     </div>
   </div>
 </template>

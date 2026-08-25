@@ -133,7 +133,14 @@ function isDirectionAvailable(direction: Direction): boolean {
     return false
   }
 
-  return !store.focusedLayer?.[`${target.x},${target.y}`]
+  // The reserved mindmap spot is not a layer cell: the + button toward it is
+  // disabled, mirroring the store's guard in addLayerTile.
+  const key = `${target.x},${target.y}`
+  if (key === store.focusedMindmapSpotOffset) {
+    return false
+  }
+
+  return !store.focusedLayer?.[key]
 }
 
 function addTile(direction: Direction) {

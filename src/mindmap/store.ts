@@ -93,6 +93,20 @@ export interface MindmapActions {
   setPosition: (nodeId: string, x: number, y: number) => void
   setNodeStyle: (nodeId: string, patch: Partial<Style>) => void
   clearNodeStyle: (nodeId: string, fields: (keyof Style)[]) => void
+  /**
+   * Removes a topic's TOP image entirely — image, imageWidth and imageAspect
+   * in ONE op, so Ctrl+Z restores the whole image in one step. The node itself
+   * is untouched: this is the image selection's Delete, distinct from
+   * `remove` (which deletes the topic and its subtree).
+   */
+  removeNodeImage: (nodeId: string) => void
+  /**
+   * Creates and persists a fresh blank sheet WITHOUT opening it — the chart
+   * store's "has mindmap?" Yes uses this so the spot can flip to the icon
+   * without mounting the overlay. Returns the new sheet id, or null if
+   * storage refused the write. The open sheet state is untouched.
+   */
+  createBlankSheet: () => Promise<string | null>
   select: (ref: SelRef | null, mode?: 'replace' | 'toggle') => void
   selectMany: (refs: SelRef[]) => void
   clearSelection: () => void
@@ -284,6 +298,12 @@ export const useMindmapStore = defineStore('mindmap', {
         }
         if (ref.kind === 'relationship') {
           return sheet.relationships.some(r => r.id === ref.id)
+        }
+        if (ref.kind === 'image') {
+          // An image ref is the owning topic's id, alive only while the
+          // topic still carries its top image — deleting the image (or
+          // undoing an add) must drop the ref with it.
+          return !!sheet.nodes[ref.id] && !!sheet.nodes[ref.id].style.image
         }
         return sheet.boundaries.some(g => g.id === ref.id)
       }
@@ -627,6 +647,20 @@ export const useMindmapStore = defineStore('mindmap', {
       }
       this.commit([makeOp('setStyle', { id: nodeId, style: next, prev: node.style })])
     },
+    // The image-selection Delete: clears the top image and its size fields in
+    // one op. No-op on a topic without an image (nothing to undo).
+    removeNodeImage(nodeId: string) {
+      const node = this.sheet?.nodes[nodeId]
+      if (!node || !node.style.image) {
+        return
+      }
+      this.clearNodeStyle(nodeId, ['image', 'imageWidth', 'imageAspect'])
+    },
+    async createBlankSheet(): Promise<string | null> {
+      const sheet = blankSheet('Untitled')
+      const write = await writeSheet(sheet.sheetId, sheet)
+      return write.ok ? sheet.sheetId : null
+    },
     // `replace` (the default) is a plain click; `toggle` is a Shift/Ctrl click,
     // which adds the ref or removes it if it was already there. Passing null
     // clears, so the pre-S4 `select(null)` call sites keep working unchanged.
@@ -678,6 +712,9 @@ export const useMindmapStore = defineStore('mindmap', {
       }
       if (ref.kind === 'relationship') {
         return sheet.relationships.some(r => r.id === ref.id)
+      }
+      if (ref.kind === 'image') {
+        return !!sheet.nodes[ref.id] && !!sheet.nodes[ref.id].style.image
       }
       return sheet.boundaries.some(g => g.id === ref.id)
     },
