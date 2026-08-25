@@ -76,6 +76,66 @@ export interface SheetRepair {
   repairs: string[]
 }
 
+export type ReadSheetResult =
+  | { kind: 'ok', sheet: Sheet }
+  | { kind: 'missing' }
+  | { kind: 'unavailable', error: string }
+  | { kind: 'invalid', error: string }
+
+export async function readSheetResult(id: string): Promise<ReadSheetResult> {
+  const db = await openDb()
+  if (!db) {
+    return { kind: 'unavailable', error: 'Storage is unavailable' }
+  }
+
+  const stored = await new Promise<{ value: unknown, error: string | null }>((resolve) => {
+    let request: IDBRequest
+    try {
+      request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(id)
+    }
+    catch (error) {
+      resolve({ value: null, error: describeWriteError(error) })
+      return
+    }
+    request.onsuccess = () => resolve({ value: request.result ?? null, error: null })
+    request.onerror = () => resolve({ value: null, error: describeWriteError(request.error) })
+  })
+
+  if (stored.error) {
+    return { kind: 'unavailable', error: stored.error }
+  }
+  if (!stored.value) {
+    return { kind: 'missing' }
+  }
+
+  try {
+    const repaired = repairSheet(stored.value)
+    if (!repaired.sheet) {
+      return { kind: 'invalid', error: 'The sheet contains no readable topics' }
+    }
+    const sheet = repaired.sheet
+    const repairs = [...repaired.repairs, ...migrate(sheet)]
+    // The key IS the identity. A sheet whose stored sheetId disagrees with the
+    // key it lives under would be saved back under the id it claims, leaving
+    // the original key holding a copy nothing writes to any more.
+    if (sheet.sheetId !== id) {
+      repairs.push(`sheetId said "${sheet.sheetId}"; aligned it with the key "${id}"`)
+      sheet.sheetId = id
+    }
+    if (repairs.length > 0) {
+      console.warn(`Repaired mindmap sheet "${id}":\n  ${repairs.join('\n  ')}`)
+      // Written back so the repair is paid for once. A failed write is not
+      // worth reporting here: the sheet in memory is sound and the next
+      // autosave will persist it anyway.
+      await writeSheet(id, sheet)
+    }
+    return { kind: 'ok', sheet }
+  }
+  catch (error) {
+    return { kind: 'invalid', error: error instanceof Error ? error.message : 'Invalid sheet' }
+  }
+}
+
 /**
  * Stamps the schema version on a sheet written before the field existed.
  *
@@ -240,53 +300,23 @@ export function repairSheet(input: unknown): SheetRepair {
   return { sheet, repairs }
 }
 
+/**
+ * The lossy view of `readSheetResult`, for the callers that genuinely cannot
+ * act on WHY a sheet did not load — the export walk and the startup sweep,
+ * which both treat an unreadable sheet as a reason to skip work rather than a
+ * reason to show the user anything. Anything that OPENS a sheet must use
+ * `readSheetResult`: collapsing "storage is down" into "no such sheet" is what
+ * let a blank map take an existing one's place.
+ */
 export async function readSheet(id: string): Promise<Sheet | null> {
-  const db = await openDb()
-  if (!db) {
-    return null
+  const result = await readSheetResult(id)
+  if (result.kind === 'ok') {
+    return result.sheet
   }
-
-  const stored = await new Promise<unknown>((resolve) => {
-    const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(id)
-    request.onsuccess = () => {
-      resolve(request.result ?? null)
-    }
-    request.onerror = () => {
-      resolve(null)
-    }
-  })
-  if (!stored) {
-    return null
+  if (result.kind !== 'missing') {
+    console.error(`Mindmap sheet "${id}" could not be read: ${result.error}`)
   }
-
-  let repaired: SheetRepair
-  try {
-    repaired = repairSheet(stored)
-  }
-  catch (error) {
-    // The repair pass exists to stop a damaged sheet taking the overlay down;
-    // it taking the overlay down itself would be the same bug wearing a hat.
-    console.error(`Could not validate mindmap sheet "${id}"; opening it as stored:`, error)
-    return stored as Sheet
-  }
-  const { sheet, repairs } = repaired
-  if (!sheet) {
-    console.error(`Mindmap sheet "${id}" held no readable topics; a blank sheet opens in its place`)
-    return null
-  }
-
-  repairs.push(...migrate(sheet))
-  if (repairs.length > 0) {
-    console.warn(`Repaired mindmap sheet "${id}":\n  ${repairs.join('\n  ')}`)
-    // Written back so the repair is paid for once. A failed write is not worth
-    // reporting here: the sheet in memory is sound and the next autosave will
-    // persist it anyway.
-    if (!sheet.sheetId) {
-      sheet.sheetId = id
-    }
-    await writeSheet(id, sheet)
-  }
-  return sheet
+  return null
 }
 
 /**
@@ -311,9 +341,11 @@ export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult>
   }
 
   return new Promise<WriteResult>((resolve) => {
+    let transaction: IDBTransaction
     let request: IDBRequest
     try {
-      request = db.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put(sheet, id)
+      transaction = db.transaction(STORE_NAME, 'readwrite')
+      request = transaction.objectStore(STORE_NAME).put(sheet, id)
     }
     catch (error) {
       // Opening the transaction throws on its own (a closing connection, a
@@ -323,7 +355,7 @@ export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult>
       resolve({ ok: false, error: describeWriteError(error) })
       return
     }
-    request.onsuccess = () => {
+    transaction.oncomplete = () => {
       resolve({ ok: true })
     }
     request.onerror = () => {
@@ -333,6 +365,14 @@ export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult>
       console.error('Failed to write mindmap sheet:', request.error)
       resolve({ ok: false, error: describeWriteError(request.error) })
     }
+    transaction.onerror = () => {
+      console.error('Failed to commit mindmap sheet:', transaction.error)
+      resolve({ ok: false, error: describeWriteError(transaction.error) })
+    }
+    transaction.onabort = () => {
+      console.error('Mindmap sheet transaction aborted:', transaction.error)
+      resolve({ ok: false, error: describeWriteError(transaction.error) })
+    }
   })
 }
 
@@ -341,10 +381,27 @@ export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult>
 // DOMException name nobody outside the console can read.
 function describeWriteError(error: unknown): string {
   const name = error instanceof DOMException ? error.name : ''
-  if (name === 'QuotaExceededError') {
-    return 'Out of browser storage — free some space to keep saving'
+  switch (name) {
+    case 'QuotaExceededError':
+      return 'Out of browser storage — free some space to keep saving'
+    case 'InvalidStateError':
+      // The connection closed under us: another tab ran a version change, or
+      // the browser reclaimed it. Reopening gets a fresh one.
+      return 'Browser storage closed unexpectedly — close this and open it again'
+    case 'VersionError':
+      return 'This map was written by a newer version of the app'
+    case 'SecurityError':
+    case 'InvalidAccessError':
+      return 'The browser is blocking storage here — private browsing or a site setting'
+    case 'NotFoundError':
+      return 'The browser storage this app uses is missing'
+    case '':
+      return error instanceof Error ? error.message : 'Unknown storage error'
+    default:
+      // A name nobody outside the console can read is worse than no name, so
+      // it travels as context on a sentence rather than as the whole message.
+      return `Browser storage failed (${name})`
   }
-  return name || (error instanceof Error ? error.message : 'Unknown storage error')
 }
 
 export async function deleteSheet(id: string): Promise<void> {

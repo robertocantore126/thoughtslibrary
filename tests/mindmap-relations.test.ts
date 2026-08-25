@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { layoutSheet } from '../src/mindmap/layout'
 import { addGroup, addRelationship, removeGroup, removeRelationship, updateGroup, updateRelationship } from '../src/mindmap/relationCommands'
 import { groupBounds, memberRectsOf, relationshipHit } from '../src/mindmap/relations'
-import { blankSheet, readSheet, writeSheet } from '../src/mindmap/storage'
+import { blankSheet, readSheetResult, writeSheet } from '../src/mindmap/storage'
 import { useMindmapStore } from '../src/mindmap/store'
 import { DEFAULT_STRUCTURE, type MindNode, type Sheet } from '../src/mindmap/types'
 
@@ -18,6 +18,7 @@ vi.mock('../src/mindmap/layout', () => ({
 
 vi.mock('../src/mindmap/storage', () => ({
   readSheet: vi.fn(),
+  readSheetResult: vi.fn(),
   writeSheet: vi.fn(),
   deleteSheet: vi.fn(),
   listSheetIds: vi.fn(),
@@ -109,7 +110,7 @@ function makeFixture(): Sheet {
 }
 
 async function openFixture() {
-  vi.mocked(readSheet).mockResolvedValue(makeFixture())
+  vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeFixture() })
   const store = useMindmapStore()
   await store.open('fixture')
   return store
@@ -117,9 +118,9 @@ async function openFixture() {
 
 beforeEach(() => {
   setActivePinia(createPinia())
-  vi.mocked(readSheet).mockReset()
+  vi.mocked(readSheetResult).mockReset()
   vi.mocked(writeSheet).mockReset()
-  vi.mocked(readSheet).mockResolvedValue(null)
+  vi.mocked(readSheetResult).mockResolvedValue({ kind: 'missing' })
   vi.mocked(writeSheet).mockResolvedValue({ ok: true })
   vi.mocked(layoutSheet).mockClear()
   vi.mocked(blankSheet).mockClear()

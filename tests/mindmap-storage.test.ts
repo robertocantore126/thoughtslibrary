@@ -1,6 +1,6 @@
 import type { MindNode, Sheet } from '../src/mindmap/types'
 import { describe, expect, it } from 'vitest'
-import { blankSheet, deleteSheet, listSheetIds, readSheet, writeSheet } from '../src/mindmap/storage'
+import { blankSheet, deleteSheet, listSheetIds, readSheet, readSheetResult, writeSheet } from '../src/mindmap/storage'
 import 'fake-indexeddb/auto'
 
 /**
@@ -97,5 +97,63 @@ describe('missing IndexedDB', () => {
     finally {
       Object.defineProperty(globalThis, 'indexedDB', { value: original, configurable: true })
     }
+  })
+})
+
+/**
+ * `readSheet` collapses every failure into `null`, which is why a momentary
+ * IndexedDB outage used to look exactly like "this sheet does not exist" and a
+ * blank map took an existing one's place. `readSheetResult` is the API that
+ * keeps the four answers apart; these lock that apart-ness in.
+ */
+describe('readSheetResult', () => {
+  it('reports a stored sheet as ok', async () => {
+    const sheet = fixtureSheet()
+    await writeSheet(sheet.sheetId, sheet)
+
+    const result = await readSheetResult(sheet.sheetId)
+    expect(result.kind).toBe('ok')
+    expect(result.kind === 'ok' && result.sheet).toEqual(sheet)
+  })
+
+  it('reports an unknown id as missing, not as a failure', async () => {
+    const result = await readSheetResult('no-such-sheet')
+    expect(result).toEqual({ kind: 'missing' })
+  })
+
+  it('reports an unreachable database as unavailable, NOT as missing', async () => {
+    const original = globalThis.indexedDB
+    Object.defineProperty(globalThis, 'indexedDB', { value: undefined, configurable: true })
+    try {
+      const result = await readSheetResult('any-id')
+      expect(result.kind).toBe('unavailable')
+      expect(result.kind === 'unavailable' && result.error).toBeTruthy()
+    }
+    finally {
+      Object.defineProperty(globalThis, 'indexedDB', { value: original, configurable: true })
+    }
+  })
+
+  it('reports a record with no readable topics as invalid, NOT as missing', async () => {
+    await writeSheet('damaged', { title: 'nothing here' } as unknown as Sheet)
+
+    const result = await readSheetResult('damaged')
+    expect(result.kind).toBe('invalid')
+  })
+
+  it('aligns a sheetId that disagrees with the key it lives under, and writes it back', async () => {
+    const sheet = fixtureSheet()
+    // The document claims one identity while living under another: left alone,
+    // the next save would write it back under the id it CLAIMS, stranding a
+    // copy at the key everything else still reads from.
+    await writeSheet('key-a', { ...sheet, sheetId: 'claims-to-be-b' })
+
+    const result = await readSheetResult('key-a')
+    expect(result.kind === 'ok' && result.sheet.sheetId).toBe('key-a')
+
+    // Paid for once: the repair is on disk, not just in the returned object.
+    const again = await readSheetResult('key-a')
+    expect(again.kind === 'ok' && again.sheet.sheetId).toBe('key-a')
+    await expect(readSheet('claims-to-be-b')).resolves.toBeNull()
   })
 })

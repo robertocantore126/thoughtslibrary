@@ -212,6 +212,7 @@ async function syncMeasure() {
     await ensureFontsReady()
     await nextTick()
     let changed = false
+    const nextCache = { ...sizeCache.value }
     for (const node of unmeasuredNodes.value) {
       const el = measureEls.value[node.id]
       if (!el) {
@@ -219,10 +220,14 @@ async function syncMeasure() {
       }
       const w = el.offsetWidth
       const h = el.offsetHeight
-      // Replacement, not in-place: sizeCache is a shallowRef, so a mutated
-      // entry would not retrigger the unmeasuredNodes computed.
-      sizeCache.value = { ...sizeCache.value, [node.id]: { key: sizeKey(node), w, h } }
+      nextCache[node.id] = { key: sizeKey(node), w, h }
       changed = true
+    }
+    if (changed) {
+      // Replace once after the batch, rather than once per node. This keeps
+      // the shallow cache reactive without turning a wide map into N computed
+      // invalidations and watcher passes.
+      sizeCache.value = nextCache
     }
     if (!changed) {
       return

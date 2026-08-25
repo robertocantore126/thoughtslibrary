@@ -171,6 +171,9 @@ function clearStyle(...fields: (keyof Style)[]) {
 // the topic box to be computable without loading anything.
 const imageInput = ref<HTMLInputElement | null>(null)
 const imageError = ref('')
+// Set when open() refused. The overlay stays up showing why, rather than
+// closing silently or opening a blank map in the real one's place.
+const openError = ref('')
 const defaultImageWidth = DEFAULT_IMAGE_WIDTH
 
 function pickImage() {
@@ -213,8 +216,8 @@ async function onImagePicked(event: Event) {
     const url = await storeLocalImage(file)
     const aspect = await readImageAspect(file)
     // The picker can outlive a selection change; re-check before writing.
-    const node = selectedNode.value ?? nodeAtPick
-    if (!node) {
+    const node = selectedNode.value
+    if (!node || node.id !== nodeAtPick.id) {
       return
     }
     const patch: Partial<Style> = { image: url, imageAspect: aspect }
@@ -282,18 +285,34 @@ onMounted(async () => {
   // that itself — then load the tile's existing sheet, or create one.
   const itemId = hostItemId.value
   const existing = itemId ? store.chart.mindmaps?.[itemId] : null
-  await mindmap.open(existing ?? null)
-  const created = mindmap.sheet?.sheetId
-  if (itemId && created && created !== existing) {
+  const result = await mindmap.open(existing ?? null)
+
+  if (!result.ok) {
+    // Refused: storage is down, or the record is damaged. The map does not
+    // open and — the part that matters — the chart keeps pointing at the sheet
+    // it already had. Recording a replacement here is what used to strand the
+    // real map, still on disk, with nothing referencing it.
+    openError.value = result.error
+    return
+  }
+
+  // The host tile can be removed while the read is in flight. Writing the id
+  // then would attach this sheet to a tile that no longer exists, or to
+  // whichever chart is open now.
+  if (result.created && itemId && hostItemId.value === itemId) {
     // A brand-new sheet must be reachable after a reload: record its id on
     // the chart now, before the first autosave writes the sheet to storage.
-    store.setMindmapSheetId(itemId, created)
+    store.setMindmapSheetId(itemId, result.sheetId)
   }
   armFitBackstop()
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onWindowKeydown)
+  if (fitBackstop) {
+    clearTimeout(fitBackstop)
+    fitBackstop = null
+  }
   // The last edit must survive the overlay closing even if its debounce
   // never fired; close() flushes before dropping the sheet.
   void mindmap.close()
@@ -309,29 +328,45 @@ onUnmounted(() => {
     <div class="mindmap-overlay-backdrop" />
     <div class="mindmap-overlay-chrome">
       <div class="mindmap-toolbar">
-        <span class="mindmap-title">{{ mindmap.sheet?.title || 'Mindmap' }}</span>
+        <span class="mindmap-title">{{ openError ? 'Mindmap' : (mindmap.sheet?.title || 'Mindmap') }}</span>
         <div class="mindmap-toolbar-actions">
-          <button title="Add a child to the selected topic (or the root)" @click="addChild">
-            Add child
-          </button>
-          <button :disabled="!canAddSibling" title="Add a sibling next to the selected topic" @click="addSibling">
-            Add sibling
-          </button>
-          <button :disabled="!canDelete" title="Delete the selected topic and its subtree" @click="deleteSelected">
-            Delete
-          </button>
-          <button title="Frame the whole map in the view" @click="fitToView">
-            Fit
-          </button>
+          <!-- A refused open has no map to act on: Close is the only thing
+          left that means anything. -->
+          <template v-if="!openError">
+            <button title="Add a child to the selected topic (or the root)" @click="addChild">
+              Add child
+            </button>
+            <button :disabled="!canAddSibling" title="Add a sibling next to the selected topic" @click="addSibling">
+              Add sibling
+            </button>
+            <button :disabled="!canDelete" title="Delete the selected topic and its subtree" @click="deleteSelected">
+              Delete
+            </button>
+            <button title="Frame the whole map in the view" @click="fitToView">
+              Fit
+            </button>
+          </template>
           <button class="mindmap-close" title="Close (Esc)" @click="closeOverlay">
             Close
           </button>
         </div>
         <!-- S4 Lane C: the save-state strip. Round 0 plumbed saveState and
         saveError; this is what makes them visible. -->
-        <MindmapCommandBar />
+        <MindmapCommandBar v-if="!openError" />
       </div>
-      <div ref="bodyRef" class="mindmap-body">
+      <div v-if="openError" class="mindmap-open-error" role="alert">
+        <p class="mindmap-open-error-head">
+          This map could not be opened
+        </p>
+        <p class="mindmap-open-error-why">
+          {{ openError }}
+        </p>
+        <p class="mindmap-open-error-note">
+          Nothing was changed and nothing was written. Your map is still in storage,
+          exactly as you left it.
+        </p>
+      </div>
+      <div v-else ref="bodyRef" class="mindmap-body">
         <MindmapCanvas @settled="onMeasureSettled" />
         <!-- S4 Lane A: the floating format bar, over the map, positioned on the
         node being edited. Renders nothing until that lane fills it. -->
@@ -681,6 +716,40 @@ onUnmounted(() => {
   position: relative;
   flex: 1;
   min-height: 0;
+}
+
+/* Takes the map's place when open() refused, so the light workspace never
+   shows an empty canvas that reads as "your map is gone". */
+.mindmap-open-error {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 32px 40px;
+  text-align: center;
+}
+
+.mindmap-open-error-head {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: #24242b;
+}
+
+.mindmap-open-error-why {
+  margin: 0;
+  color: #b04a1e;
+}
+
+.mindmap-open-error-note {
+  margin: 0;
+  max-width: 46ch;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #5c5c66;
 }
 
 .mindmap-inspector {

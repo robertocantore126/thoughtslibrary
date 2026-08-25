@@ -704,8 +704,13 @@ async function restoreChartMindmaps(chart: Chart): Promise<Chart> {
       for (const node of Object.values(clone.nodes)) {
         node.style = remapImage(node.style) ?? {}
       }
-      await writeSheet(freshId, clone)
-      nextMindmaps[itemId] = freshId
+      const writeResult = await writeSheet(freshId, clone)
+      if (writeResult.ok) {
+        nextMindmaps[itemId] = freshId
+      }
+      else {
+        console.error(`Could not restore mindmap sheet "${oldSheetId}": ${writeResult.error}`)
+      }
     }
   }
 

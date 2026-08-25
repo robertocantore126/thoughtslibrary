@@ -14,7 +14,7 @@ import { shallowRef } from 'vue'
 import { History } from './history'
 import { layoutSheet, type NodeSize } from './layout'
 import { applyWithInverse, makeOp, type Op } from './ops'
-import { blankSheet, readSheet, type WriteResult, writeSheet } from './storage'
+import { blankSheet, readSheetResult, type WriteResult, writeSheet } from './storage'
 
 /**
  * Where the debounced write has got to. `pending` means edits exist that the
@@ -58,8 +58,20 @@ export interface MindmapGetters {
   primaryNodeId: (state: MindmapState) => string | null
 }
 
+/**
+ * Why an open did not produce a map. A refusal leaves the store exactly as it
+ * was — no blank sheet, nothing written — so the caller can say what happened
+ * without the chart having already moved on.
+ */
+// `error?: undefined` on the success arm for the same reason WriteResult
+// carries it: without it the union is not reliably discriminated through
+// pinia's action typing, and `result.error` fails to narrow in the else branch.
+export type OpenResult =
+  | { ok: true, created: boolean, sheetId: string, error?: undefined }
+  | { ok: false, error: string }
+
 export interface MindmapActions {
-  open: (sheetId: string | null) => Promise<void>
+  open: (sheetId: string | null) => Promise<OpenResult>
   close: () => Promise<void>
   applySizes: (sizes: Record<string, NodeSize>) => void
   createChild: (parentId: string) => string
@@ -149,11 +161,16 @@ function draftOf(sheet: Sheet): Sheet {
 // references nodes the sheet may mutate later.
 function collectSubtree(sheet: Sheet, id: string): MindNode[] {
   const out: MindNode[] = []
+  const seen = new Set<string>()
   const walk = (nodeId: string) => {
+    if (seen.has(nodeId)) {
+      return
+    }
     const node = sheet.nodes[nodeId]
     if (!node) {
       return
     }
+    seen.add(nodeId)
     out.push(structuredClone(node))
     for (const childId of node.childrenIds) {
       walk(childId)
@@ -302,8 +319,48 @@ export const useMindmapStore = defineStore('mindmap', {
       // fires and forgets, but readSheet below would race it — a read that
       // wins returns the pre-edit sheet and the last edit silently vanishes.
       await this.flushSave()
-      const loaded = sheetId === null ? null : await readSheet(sheetId)
-      const sheet = loaded ?? blankSheet('Untitled')
+
+      let sheet: Sheet
+      let created: boolean
+
+      if (sheetId === null) {
+        sheet = blankSheet('Untitled')
+        created = true
+      }
+      else {
+        const result = await readSheetResult(sheetId)
+        if (result.kind === 'ok') {
+          sheet = result.sheet
+          created = false
+        }
+        else if (result.kind === 'missing') {
+          // The chart points at a sheet that genuinely is not there any more —
+          // a dangling id from an import that half-landed, or a store cleared
+          // by hand. A fresh map is the honest thing to open.
+          sheet = blankSheet('Untitled')
+          created = true
+        }
+        else {
+          // Storage is down, or the record is unreadable. Both used to arrive
+          // here as `null` and become a blank map, which the overlay then
+          // recorded on the chart — pointing the tile at an empty sheet while
+          // the real one sat on disk, unreferenced. Refuse instead, and leave
+          // every byte of state alone so nothing has moved on when the caller
+          // decides what to say.
+          return { ok: false, error: result.error }
+        }
+      }
+
+      // A brand-new sheet must exist on disk BEFORE anything points at it. If
+      // the write fails there is nothing worth opening: publishing it anyway
+      // would show a map that vanishes on the next reload.
+      if (created) {
+        const write = await writeSheet(sheet.sheetId, sheet)
+        if (!write.ok) {
+          return { ok: false, error: write.error }
+        }
+      }
+
       history.clear()
       this.sheet = sheet
       this.selection = []
@@ -314,14 +371,11 @@ export const useMindmapStore = defineStore('mindmap', {
       this.saveState = 'clean'
       this.saveError = null
       this.camera = { x: 0, y: 0, scale: 1 }
-      if (!loaded) {
-        // A brand-new sheet must exist before the chart store points at it;
-        // the caller reads its id from `sheet` once open resolves. If that
-        // write fails the chart is about to reference a sheet that is not
-        // there, which is the one save failure worth surfacing immediately —
-        // hence after the state reset above rather than before it.
-        this.recordWrite(await writeSheet(sheet.sheetId, sheet))
-      }
+      // The id travels back in the result rather than being read off
+      // `this.sheet` afterwards: a caller that awaits open() and then reads the
+      // store singleton is reading whatever the LAST open put there, which on
+      // a fast tile switch is a different map's id.
+      return { ok: true, created, sheetId: sheet.sheetId }
     },
     async close() {
       // The last edit must survive the overlay closing even if its debounce
@@ -719,7 +773,9 @@ export const useMindmapStore = defineStore('mindmap', {
           }
         })
         .catch((error: unknown) => {
-          this.recordWrite({ ok: false, error: error instanceof Error ? error.message : 'Save failed' })
+          if (this.sheet?.sheetId === sheet.sheetId) {
+            this.recordWrite({ ok: false, error: error instanceof Error ? error.message : 'Save failed' })
+          }
         })
     },
   },

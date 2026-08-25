@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { layoutSheet } from '../src/mindmap/layout'
-import { blankSheet, readSheet, writeSheet } from '../src/mindmap/storage'
+import { blankSheet, readSheetResult, writeSheet } from '../src/mindmap/storage'
 import { useMindmapStore } from '../src/mindmap/store'
 import { DEFAULT_STRUCTURE, type MindNode, type Sheet } from '../src/mindmap/types'
 
@@ -16,6 +16,7 @@ vi.mock('../src/mindmap/layout', () => ({
 
 vi.mock('../src/mindmap/storage', () => ({
   readSheet: vi.fn(),
+  readSheetResult: vi.fn(),
   writeSheet: vi.fn(),
   deleteSheet: vi.fn(),
   listSheetIds: vi.fn(),
@@ -95,9 +96,9 @@ function makeSheet(sheetId: string, title: string): Sheet {
 
 beforeEach(() => {
   setActivePinia(createPinia())
-  vi.mocked(readSheet).mockReset()
+  vi.mocked(readSheetResult).mockReset()
   vi.mocked(writeSheet).mockReset()
-  vi.mocked(readSheet).mockResolvedValue(null)
+  vi.mocked(readSheetResult).mockResolvedValue({ kind: 'missing' })
   vi.mocked(writeSheet).mockResolvedValue({ ok: true })
   vi.mocked(layoutSheet).mockClear()
   vi.mocked(blankSheet).mockClear()
@@ -109,7 +110,7 @@ afterEach(() => {
 
 describe('mindmap store — open and history', () => {
   it('open → createChild → undo → redo round-trips', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s1', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s1', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s1')
 
@@ -135,7 +136,7 @@ describe('mindmap store — open and history', () => {
   })
 
   it('undo() reports exhaustion on a freshly opened sheet, true after one edit', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s2', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s2', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s2')
 
@@ -158,18 +159,18 @@ describe('mindmap store — open and history', () => {
   })
 
   it('open() with an unknown id creates a blank sheet in its place', async () => {
-    vi.mocked(readSheet).mockResolvedValue(null)
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'missing' })
     const store = useMindmapStore()
     await store.open('missing')
 
-    expect(vi.mocked(readSheet)).toHaveBeenCalledWith('missing')
+    expect(vi.mocked(readSheetResult)).toHaveBeenCalledWith('missing')
     expect(vi.mocked(blankSheet)).toHaveBeenCalledWith('Untitled')
     expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
   })
 
   it('close() flushes a pending autosave and drops the sheet', async () => {
     vi.useFakeTimers()
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s8', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s8', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s8')
     vi.mocked(writeSheet).mockClear()
@@ -185,7 +186,7 @@ describe('mindmap store — open and history', () => {
   })
 
   it('close() does not null a sheet that open() swapped in while its flush was in flight', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('sB', 'Sheet B'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('sB', 'Sheet B') })
     const store = useMindmapStore()
     await store.open('sA')
 
@@ -219,7 +220,7 @@ describe('mindmap store — editing actions', () => {
     const b = makeNode('b', 'root', 'Bravo', 'main')
     sheet.nodes = { root: sheet.nodes.root, a, b }
     sheet.nodes.root.childrenIds = ['a', 'b']
-    vi.mocked(readSheet).mockResolvedValue(sheet)
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet })
     const store = useMindmapStore()
     await store.open('s3')
 
@@ -239,7 +240,7 @@ describe('mindmap store — editing actions', () => {
     sheet.nodes = { root: sheet.nodes.root, a, a1 }
     sheet.nodes.root.childrenIds = ['a']
     sheet.relationships = [{ id: 'rel-1', fromId: 'a', toId: 'a1' }]
-    vi.mocked(readSheet).mockResolvedValue(sheet)
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet })
     const store = useMindmapStore()
     await store.open('s4')
 
@@ -264,7 +265,7 @@ describe('mindmap store — editing actions', () => {
   })
 
   it('rename and toggleCollapse record undoable edits', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s5', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s5', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s5')
 
@@ -280,7 +281,7 @@ describe('mindmap store — editing actions', () => {
   })
 
   it('rename of the same title is a no-op that does not touch history', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s13', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s13', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s13')
 
@@ -290,7 +291,7 @@ describe('mindmap store — editing actions', () => {
   })
 
   it('select ignores ids that are not in the sheet', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s11', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s11', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s11')
 
@@ -307,7 +308,7 @@ describe('mindmap store — editing actions', () => {
   })
 
   it('publishes a new sheet reference on every edit', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s12', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s12', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s12')
 
@@ -324,7 +325,7 @@ describe('mindmap store — editing actions', () => {
 
 describe('mindmap store — layout bridge', () => {
   it('applySizes runs layoutSheet on a fresh draft and republishes it', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s6', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s6', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s6')
 
@@ -351,7 +352,7 @@ describe('mindmap store — layout bridge', () => {
 
   it('autosaves the sheet on a debounce after an edit', async () => {
     vi.useFakeTimers()
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s7', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s7', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s7')
     vi.mocked(writeSheet).mockClear()
@@ -370,7 +371,7 @@ describe('mindmap store — layout bridge', () => {
   // looked exactly like a working session.
   it('reports a failed write instead of resolving as if it saved', async () => {
     vi.useFakeTimers()
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s12', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s12', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s12')
     expect(store.saveState).toBe('clean')
@@ -398,7 +399,7 @@ describe('mindmap store — layout bridge', () => {
 
   it('does not report a write that landed after its sheet was swapped out', async () => {
     vi.useFakeTimers()
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s13', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s13', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s13')
 
@@ -422,7 +423,7 @@ describe('mindmap store — layout bridge', () => {
 
 describe('mindmap store — camera and view', () => {
   it('panBy and zoomAt update the camera, zoom anchored at the screen point', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s9', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s9', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s9')
 
@@ -437,7 +438,7 @@ describe('mindmap store — camera and view', () => {
   })
 
   it('fit frames the map bounds in the viewport, using measured sizes', async () => {
-    vi.mocked(readSheet).mockResolvedValue(makeSheet('s10', 'Sheet'))
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s10', 'Sheet') })
     const store = useMindmapStore()
     await store.open('s10')
 
@@ -457,7 +458,7 @@ describe('mindmap store — camera and view', () => {
     a.childrenIds = ['a1']
     sheet.nodes = { root: sheet.nodes.root, a, a1, b }
     sheet.nodes.root.childrenIds = ['a', 'b']
-    vi.mocked(readSheet).mockResolvedValue(sheet)
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet })
     const store = useMindmapStore()
     await store.open('s14')
 
@@ -465,5 +466,70 @@ describe('mindmap store — camera and view', () => {
 
     await store.close()
     expect(store.visibleNodes).toEqual([])
+  })
+})
+
+/**
+ * The refusal path. Before this, every failure `readSheet` could report arrived
+ * as `null` and became a blank "Untitled" — which the overlay then recorded on
+ * the chart, pointing the tile at an empty sheet while the real one sat on disk
+ * with nothing referencing it. An open that cannot read must change nothing.
+ */
+describe('mindmap store — open refuses rather than blanking', () => {
+  it('refuses when storage is unavailable, and creates nothing', async () => {
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'unavailable', error: 'Storage is unavailable' })
+    const store = useMindmapStore()
+
+    const result = await store.open('s-real')
+
+    expect(result).toEqual({ ok: false, error: 'Storage is unavailable' })
+    expect(store.sheet).toBeNull()
+    expect(vi.mocked(blankSheet)).not.toHaveBeenCalled()
+    expect(vi.mocked(writeSheet)).not.toHaveBeenCalled()
+  })
+
+  it('refuses when the record is damaged, and creates nothing', async () => {
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'invalid', error: 'The sheet contains no readable topics' })
+    const store = useMindmapStore()
+
+    const result = await store.open('s-damaged')
+
+    expect(result.ok).toBe(false)
+    expect(store.sheet).toBeNull()
+    expect(vi.mocked(blankSheet)).not.toHaveBeenCalled()
+    expect(vi.mocked(writeSheet)).not.toHaveBeenCalled()
+  })
+
+  it('leaves the sheet already open untouched when the next open refuses', async () => {
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s-first', 'First') })
+    const store = useMindmapStore()
+    await store.open('s-first')
+    const opened = store.sheet
+
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'unavailable', error: 'Storage is unavailable' })
+    const result = await store.open('s-second')
+
+    expect(result.ok).toBe(false)
+    expect(store.sheet).toBe(opened)
+    expect(store.sheet.sheetId).toBe('s-first')
+  })
+
+  it('refuses when a brand-new sheet cannot be written, rather than opening a map that vanishes', async () => {
+    vi.mocked(writeSheet).mockResolvedValue({ ok: false, error: 'Out of browser storage' })
+    const store = useMindmapStore()
+
+    const result = await store.open(null)
+
+    expect(result).toEqual({ ok: false, error: 'Out of browser storage' })
+    expect(store.sheet).toBeNull()
+  })
+
+  it('returns the id it opened, so a caller never has to read the store singleton', async () => {
+    vi.mocked(readSheetResult).mockResolvedValue({ kind: 'ok', sheet: makeSheet('s-known', 'Known') })
+    const store = useMindmapStore()
+
+    const result = await store.open('s-known')
+
+    expect(result).toEqual({ ok: true, created: false, sheetId: 's-known' })
   })
 })
