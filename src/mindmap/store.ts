@@ -1,4 +1,4 @@
-import type { MindNode, Sheet, Style } from './types'
+import type { MindNode, SelRef, Sheet, Style, TextRun } from './types'
 /**
  * The mindmap store — the single owner of the open sheet, the selection, the
  * camera and the undo/redo history (MINDMAP_NATIVE_AGENT_BRIEF Lane D).
@@ -14,18 +14,48 @@ import { shallowRef } from 'vue'
 import { History } from './history'
 import { layoutSheet, type NodeSize } from './layout'
 import { applyWithInverse, makeOp, type Op } from './ops'
-import { blankSheet, readSheet, writeSheet } from './storage'
+import { blankSheet, readSheet, type WriteResult, writeSheet } from './storage'
+
+/**
+ * Where the debounced write has got to. `pending` means edits exist that the
+ * timer has not written yet; `error` means the last attempt failed and is the
+ * only state the UI must make impossible to miss (S4 Round 0 job 5).
+ */
+export type SaveState = 'clean' | 'pending' | 'saving' | 'error'
+
+/**
+ * A request to open the inline title editor on a node, seeded with `seed` (the
+ * character that triggered type-to-edit, or '' for F2). It lives in the store
+ * because the component that asks — the interaction controller — and the
+ * component that obeys — MindmapNode — are owned by different S4 lanes and
+ * must not import each other. The node clears it once its editor is open.
+ */
+export interface PendingEdit {
+  nodeId: string
+  seed: string
+}
 
 export interface MindmapState {
   sheet: Sheet | null
-  selection: string | null
+  /**
+   * The selection, in the order the user built it — the LAST entry is the
+   * primary one, which is what the inspector edits and what Delete acts on.
+   * Typed refs rather than bare ids because relationships and boundaries are
+   * selectable too and share the id space with nothing.
+   */
+  selection: SelRef[]
   camera: { x: number, y: number, scale: number }
   canUndo: boolean
   canRedo: boolean
+  saveState: SaveState
+  saveError: string | null
+  pendingEdit: PendingEdit | null
 }
 
 export interface MindmapGetters {
   visibleNodes: (state: MindmapState) => MindNode[]
+  selectedNodeIds: (state: MindmapState) => string[]
+  primaryNodeId: (state: MindmapState) => string | null
 }
 
 export interface MindmapActions {
@@ -34,17 +64,30 @@ export interface MindmapActions {
   applySizes: (sizes: Record<string, NodeSize>) => void
   createChild: (parentId: string) => string
   createSibling: (nodeId: string) => string
-  rename: (nodeId: string, title: string) => void
+  rename: (nodeId: string, title: string, runs?: TextRun[]) => void
   remove: (nodeId: string) => void
   toggleCollapse: (nodeId: string) => void
   setNodeStyle: (nodeId: string, patch: Partial<Style>) => void
   clearNodeStyle: (nodeId: string, fields: (keyof Style)[]) => void
-  select: (nodeId: string | null) => void
+  select: (ref: SelRef | null, mode?: 'replace' | 'toggle') => void
+  selectMany: (refs: SelRef[]) => void
+  clearSelection: () => void
+  isSelected: (ref: SelRef) => boolean
+  refExists: (ref: SelRef) => boolean
+  requestEdit: (nodeId: string, seed?: string) => void
+  clearPendingEdit: () => void
   panBy: (dx: number, dy: number) => void
   zoomAt: (sx: number, sy: number, factor: number) => void
   fit: (viewW: number, viewH: number) => void
   undo: () => boolean
   redo: () => boolean
+  /**
+   * The extension seam (S4 §0.2). It builds the copy-on-write draft, applies
+   * each op, records the inverses in history, republishes and schedules the
+   * save — so a new command is a pure op builder in its own module that ends
+   * here, and does not need a new action on this store.
+   */
+  commit: (ops: Op[]) => void
 }
 
 // Autosave debounce, mirroring the chart store's own settle-then-write trade
@@ -121,10 +164,13 @@ function collectSubtree(sheet: Sheet, id: string): MindNode[] {
 export const useMindmapStore = defineStore('mindmap', {
   state: () => ({
     sheet: shallowRef<Sheet | null>(null),
-    selection: null as string | null,
+    selection: [] as SelRef[],
     camera: { x: 0, y: 0, scale: 1 },
     canUndo: false,
     canRedo: false,
+    saveState: 'clean' as SaveState,
+    saveError: null as string | null,
+    pendingEdit: null as PendingEdit | null,
     // Last measured sizes, kept only so fit() can frame the map. Not part of
     // the frozen contract; shallow so a several-hundred-entry record is never
     // proxied (the same rule the brief applies to the node map).
@@ -163,14 +209,48 @@ export const useMindmapStore = defineStore('mindmap', {
       }
       return out
     },
+    // The node ids of the selection, in selection order. Almost every caller
+    // wants this rather than the raw refs — relationships and boundaries are
+    // selected far more rarely than topics are.
+    selectedNodeIds(state: MindmapState): string[] {
+      return state.selection.filter(ref => ref.kind === 'node').map(ref => ref.id)
+    },
+    // The topic the inspector edits: the LAST node selected, not the first.
+    // Shift-clicking a second topic must move the inspector to it, or the
+    // panel keeps editing something the user stopped looking at.
+    primaryNodeId(state: MindmapState): string | null {
+      for (let i = state.selection.length - 1; i >= 0; i--) {
+        const ref = state.selection[i]
+        if (ref.kind === 'node') {
+          return ref.id
+        }
+      }
+      return null
+    },
   },
   actions: {
-    // Republishes a structural draft and drops a selection that no longer
-    // points at anything (a removed node, or a node an undo just deleted).
+    // Republishes a structural draft and drops selection entries that no longer
+    // point at anything (a removed node, a relationship an undo just deleted).
+    // Every kind is checked: before S4 only nodes were selectable, and a stale
+    // relationship ref would leave the inspector editing a ghost.
     publish(draft: Sheet) {
       this.sheet = draft
-      if (this.selection && !this.sheet.nodes[this.selection]) {
-        this.selection = null
+      const sheet = this.sheet
+      const alive = (ref: SelRef) => {
+        if (ref.kind === 'node') {
+          return !!sheet.nodes[ref.id]
+        }
+        if (ref.kind === 'relationship') {
+          return sheet.relationships.some(r => r.id === ref.id)
+        }
+        return sheet.boundaries.some(g => g.id === ref.id)
+      }
+      if (this.selection.some(ref => !alive(ref))) {
+        this.selection = this.selection.filter(alive)
+      }
+      // An editor open on a node that just vanished has nothing to commit to.
+      if (this.pendingEdit && !sheet.nodes[this.pendingEdit.nodeId]) {
+        this.pendingEdit = null
       }
     },
     // Applies a batch of already-built ops to a fresh draft, records their
@@ -217,18 +297,24 @@ export const useMindmapStore = defineStore('mindmap', {
       await this.flushSave()
       const loaded = sheetId === null ? null : await readSheet(sheetId)
       const sheet = loaded ?? blankSheet('Untitled')
-      if (!loaded) {
-        // A brand-new sheet must exist before the chart store points at it;
-        // the caller reads its id from `sheet` once open resolves.
-        await writeSheet(sheet.sheetId, sheet)
-      }
       history.clear()
       this.sheet = sheet
-      this.selection = null
+      this.selection = []
+      this.pendingEdit = null
       this.sizes = {}
       this.canUndo = false
       this.canRedo = false
+      this.saveState = 'clean'
+      this.saveError = null
       this.camera = { x: 0, y: 0, scale: 1 }
+      if (!loaded) {
+        // A brand-new sheet must exist before the chart store points at it;
+        // the caller reads its id from `sheet` once open resolves. If that
+        // write fails the chart is about to reference a sheet that is not
+        // there, which is the one save failure worth surfacing immediately —
+        // hence after the state reset above rather than before it.
+        this.recordWrite(await writeSheet(sheet.sheetId, sheet))
+      }
     },
     async close() {
       // The last edit must survive the overlay closing even if its debounce
@@ -244,10 +330,13 @@ export const useMindmapStore = defineStore('mindmap', {
       }
       history.clear()
       this.sheet = null
-      this.selection = null
+      this.selection = []
+      this.pendingEdit = null
       this.sizes = {}
       this.canUndo = false
       this.canRedo = false
+      this.saveState = 'clean'
+      this.saveError = null
       this.camera = { x: 0, y: 0, scale: 1 }
     },
     // Lane E measured the DOM and hands the sizes over. Layout runs here
@@ -300,13 +389,31 @@ export const useMindmapStore = defineStore('mindmap', {
       })])
       return id
     },
-    rename(nodeId: string, title: string) {
+    // `runs` carries the styled version of the same title. `title` stays the
+    // plain-text projection of it and is what the rest of the product reads
+    // (types.ts MindNode.title) — so a caller passing runs must pass the
+    // matching plain text, and the setTitle op carries both plus their
+    // predecessors, which is what makes Ctrl+Z restore the formatting too.
+    //
+    // The early-out compares runs as well: bolding a word leaves `title`
+    // identical, and bailing on that would silently drop the edit.
+    rename(nodeId: string, title: string, runs?: TextRun[]) {
       const sheet = this.sheet
       const node = sheet?.nodes[nodeId]
-      if (!sheet || !node || node.title === title) {
+      if (!sheet || !node) {
         return
       }
-      this.commit([makeOp('setTitle', { id: nodeId, title, prev: node.title })])
+      const sameRuns = JSON.stringify(node.titleRuns ?? null) === JSON.stringify(runs ?? null)
+      if (node.title === title && sameRuns) {
+        return
+      }
+      this.commit([makeOp('setTitle', {
+        id: nodeId,
+        title,
+        prev: node.title,
+        titleRuns: runs,
+        prevRuns: node.titleRuns,
+      })])
     },
     remove(nodeId: string) {
       const sheet = this.sheet
@@ -380,11 +487,72 @@ export const useMindmapStore = defineStore('mindmap', {
       }
       this.commit([makeOp('setStyle', { id: nodeId, style: next, prev: node.style })])
     },
-    select(nodeId: string | null) {
-      if (nodeId !== null && !this.sheet?.nodes[nodeId]) {
+    // `replace` (the default) is a plain click; `toggle` is a Shift/Ctrl click,
+    // which adds the ref or removes it if it was already there. Passing null
+    // clears, so the pre-S4 `select(null)` call sites keep working unchanged.
+    select(ref: SelRef | null, mode: 'replace' | 'toggle' = 'replace') {
+      if (ref === null) {
+        this.selection = []
         return
       }
-      this.selection = nodeId
+      if (!this.refExists(ref)) {
+        return
+      }
+      if (mode === 'replace') {
+        this.selection = [ref]
+        return
+      }
+      const without = this.selection.filter(r => !(r.kind === ref.kind && r.id === ref.id))
+      // Re-adding an already-selected ref pushes it to the end rather than
+      // leaving it where it was: the last entry is the primary one, and a
+      // Shift-click the user just made is what they mean to be editing.
+      this.selection = without.length === this.selection.length ? [...without, ref] : without
+    },
+    selectMany(refs: SelRef[]) {
+      const seen = new Set<string>()
+      this.selection = refs.filter((ref) => {
+        const key = `${ref.kind}:${ref.id}`
+        if (seen.has(key) || !this.refExists(ref)) {
+          return false
+        }
+        seen.add(key)
+        return true
+      })
+    },
+    clearSelection() {
+      this.selection = []
+    },
+    isSelected(ref: SelRef): boolean {
+      return this.selection.some(r => r.kind === ref.kind && r.id === ref.id)
+    },
+    // Whether a ref points at something the open sheet actually holds. Selection
+    // has always refused ids that do not resolve; this keeps that rule for all
+    // three kinds rather than only for nodes.
+    refExists(ref: SelRef): boolean {
+      const sheet = this.sheet
+      if (!sheet) {
+        return false
+      }
+      if (ref.kind === 'node') {
+        return !!sheet.nodes[ref.id]
+      }
+      if (ref.kind === 'relationship') {
+        return sheet.relationships.some(r => r.id === ref.id)
+      }
+      return sheet.boundaries.some(g => g.id === ref.id)
+    },
+    // The one channel between the interaction controller and the inline editor
+    // (S4 §0.3): type-to-edit, F2 and the context menu all land here, and
+    // MindmapNode watches it, opens its editor seeded with `seed`, and clears
+    // it. Neither side imports the other.
+    requestEdit(nodeId: string, seed = '') {
+      if (!this.sheet?.nodes[nodeId]) {
+        return
+      }
+      this.pendingEdit = { nodeId, seed }
+    },
+    clearPendingEdit() {
+      this.pendingEdit = null
     },
     panBy(dx: number, dy: number) {
       this.camera = { ...this.camera, x: this.camera.x + dx, y: this.camera.y + dy }
@@ -473,6 +641,13 @@ export const useMindmapStore = defineStore('mindmap', {
       if (!sheet) {
         return
       }
+      // Unsaved edits exist from this moment, not from when the timer fires.
+      // A previous failure stays visible until a write actually succeeds: an
+      // error that clears itself the instant the user types again is an error
+      // nobody ever reads.
+      if (this.saveState !== 'error') {
+        this.saveState = 'pending'
+      }
       if (saveTimer) {
         clearTimeout(saveTimer)
       }
@@ -481,11 +656,23 @@ export const useMindmapStore = defineStore('mindmap', {
         this.flushSave()
       }, AUTOSAVE_DELAY)
     },
+    // Folds a WriteResult into the visible save state. One place, so no write
+    // path can report success by forgetting to report anything.
+    recordWrite(result: WriteResult) {
+      if (result.ok) {
+        this.saveState = 'clean'
+        this.saveError = null
+      }
+      else {
+        this.saveState = 'error'
+        this.saveError = result.error
+      }
+    },
     // Writes the current sheet, clearing any pending debounce. Safe to call at
-    // any time; a failed write degrades silently rather than throwing — the
-    // storage lane mirrors this posture, so an unavailable IndexedDB must
-    // never take the UI down with it. Returns a promise so open()/close() can
-    // await the write before a read or teardown depends on it.
+    // any time; a failed write still never throws — an unavailable IndexedDB
+    // must not take the UI down with it — but it is now RECORDED rather than
+    // swallowed. Returns a promise so open()/close() can await the write
+    // before a read or teardown depends on it.
     flushSave(): Promise<void> {
       if (saveTimer) {
         clearTimeout(saveTimer)
@@ -495,7 +682,19 @@ export const useMindmapStore = defineStore('mindmap', {
       if (!sheet) {
         return Promise.resolve()
       }
-      return writeSheet(sheet.sheetId, sheet).catch(() => {})
+      this.saveState = 'saving'
+      return writeSheet(sheet.sheetId, sheet)
+        .then((result) => {
+          // The sheet may have been swapped or closed while the write was in
+          // flight; reporting "saved" then would describe a sheet that is no
+          // longer open.
+          if (this.sheet?.sheetId === sheet.sheetId) {
+            this.recordWrite(result)
+          }
+        })
+        .catch((error: unknown) => {
+          this.recordWrite({ ok: false, error: error instanceof Error ? error.message : 'Save failed' })
+        })
     },
   },
 }) as unknown as StoreDefinition<'mindmap', MindmapState, MindmapGetters, MindmapActions>

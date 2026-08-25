@@ -83,27 +83,62 @@ export async function readSheet(id: string): Promise<Sheet | null> {
   })
 }
 
-export async function writeSheet(id: string, sheet: Sheet): Promise<void> {
+/**
+ * Whether the write reached the disk. `writeSheet` still never throws — an
+ * unavailable or full IndexedDB must not take the UI down — but it no longer
+ * resolves identically to a success either. Before S4 a quota-exhausted store
+ * meant an hour of editing was lost with one line in the console and a UI that
+ * looked exactly like a working one; the caller now has something to show.
+ */
+// `error?: undefined` on the success arm is not decoration: without it the
+// union is not reliably discriminated through pinia's action typing, and
+// `result.error` fails to narrow in the else branch.
+export type WriteResult = { ok: true, error?: undefined } | { ok: false, error: string }
+
+export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult> {
   const db = await openDb()
   if (!db) {
     // The sheet itself is never cached in memory for later retry — degrade
     // loudly rather than pretend the edit was saved.
     console.error('IndexedDB is unavailable; mindmap changes are not being saved')
-    return
+    return { ok: false, error: 'Storage is unavailable' }
   }
 
-  await new Promise<void>((resolve) => {
-    const request = db.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put(sheet, id)
+  return new Promise<WriteResult>((resolve) => {
+    let request: IDBRequest
+    try {
+      request = db.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put(sheet, id)
+    }
+    catch (error) {
+      // Opening the transaction throws on its own (a closing connection, a
+      // store that vanished under a version change), and that path never
+      // reached the handlers below.
+      console.error('Failed to open a mindmap write transaction:', error)
+      resolve({ ok: false, error: describeWriteError(error) })
+      return
+    }
     request.onsuccess = () => {
-      resolve()
+      resolve({ ok: true })
     }
     request.onerror = () => {
       // A full store must not take the app down with it: the user keeps
-      // editing, the next debounced write tries again.
+      // editing, the next debounced write tries again — but the failure is
+      // now reported rather than swallowed.
       console.error('Failed to write mindmap sheet:', request.error)
-      resolve()
+      resolve({ ok: false, error: describeWriteError(request.error) })
     }
   })
+}
+
+// Quota exhaustion is the failure this is most likely to hit, and it is the one
+// the user can actually act on, so it gets its own words instead of a
+// DOMException name nobody outside the console can read.
+function describeWriteError(error: unknown): string {
+  const name = error instanceof DOMException ? error.name : ''
+  if (name === 'QuotaExceededError') {
+    return 'Out of browser storage — free some space to keep saving'
+  }
+  return name || (error instanceof Error ? error.message : 'Unknown storage error')
 }
 
 export async function deleteSheet(id: string): Promise<void> {

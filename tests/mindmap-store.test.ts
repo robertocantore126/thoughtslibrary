@@ -98,7 +98,7 @@ beforeEach(() => {
   vi.mocked(readSheet).mockReset()
   vi.mocked(writeSheet).mockReset()
   vi.mocked(readSheet).mockResolvedValue(null)
-  vi.mocked(writeSheet).mockResolvedValue(undefined)
+  vi.mocked(writeSheet).mockResolvedValue({ ok: true })
   vi.mocked(layoutSheet).mockClear()
   vi.mocked(blankSheet).mockClear()
 })
@@ -180,7 +180,7 @@ describe('mindmap store — open and history', () => {
     expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
     expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s8', expect.anything())
     expect(store.sheet).toBeNull()
-    expect(store.selection).toBeNull()
+    expect(store.selection).toEqual([])
     expect(store.undo()).toBe(false)
   })
 
@@ -243,13 +243,13 @@ describe('mindmap store — editing actions', () => {
     const store = useMindmapStore()
     await store.open('s4')
 
-    store.select('a1')
+    store.select({ kind: 'node', id: 'a1' })
     store.remove('a')
     expect(store.sheet.nodes.a).toBeUndefined()
     expect(store.sheet.nodes.a1).toBeUndefined()
     expect(store.sheet.nodes.root.childrenIds).toEqual([])
     expect(store.sheet.relationships).toEqual([])
-    expect(store.selection).toBeNull()
+    expect(store.selection).toEqual([])
 
     // The root is not removable — a sheet must keep its central node.
     store.remove('root')
@@ -294,12 +294,16 @@ describe('mindmap store — editing actions', () => {
     const store = useMindmapStore()
     await store.open('s11')
 
-    store.select('root')
-    expect(store.selection).toBe('root')
-    store.select('missing')
-    expect(store.selection).toBe('root')
+    store.select({ kind: 'node', id: 'root' })
+    expect(store.selectedNodeIds).toEqual(['root'])
+    expect(store.primaryNodeId).toBe('root')
+    // A ref that resolves to nothing is refused, leaving the selection alone.
+    store.select({ kind: 'node', id: 'missing' })
+    expect(store.selectedNodeIds).toEqual(['root'])
+    store.select({ kind: 'relationship', id: 'missing' })
+    expect(store.selectedNodeIds).toEqual(['root'])
     store.select(null)
-    expect(store.selection).toBeNull()
+    expect(store.selection).toEqual([])
   })
 
   it('publishes a new sheet reference on every edit', async () => {
@@ -358,6 +362,61 @@ describe('mindmap store — layout bridge', () => {
     await vi.advanceTimersByTimeAsync(500)
     expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
     expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s7', store.sheet)
+  })
+
+  // S4 Round 0 job 5. Before it, writeSheet resolved identically whether or not
+  // the bytes reached the disk and flushSave swallowed the rest with
+  // `.catch(() => {})`: a full IndexedDB cost the user an hour of editing and
+  // looked exactly like a working session.
+  it('reports a failed write instead of resolving as if it saved', async () => {
+    vi.useFakeTimers()
+    vi.mocked(readSheet).mockResolvedValue(makeSheet('s12', 'Sheet'))
+    const store = useMindmapStore()
+    await store.open('s12')
+    expect(store.saveState).toBe('clean')
+
+    vi.mocked(writeSheet).mockResolvedValue({ ok: false, error: 'Out of browser storage' })
+    store.createChild('root')
+    // Unsaved work exists from the edit, not from when the timer fires.
+    expect(store.saveState).toBe('pending')
+
+    await vi.advanceTimersByTimeAsync(500)
+    expect(store.saveState).toBe('error')
+    expect(store.saveError).toBe('Out of browser storage')
+
+    // A further edit must not wipe the error back to 'pending'. An error that
+    // clears itself the moment the user types again is one nobody ever reads.
+    store.createChild('root')
+    expect(store.saveState).toBe('error')
+
+    vi.mocked(writeSheet).mockResolvedValue({ ok: true })
+    store.createChild('root')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(store.saveState).toBe('clean')
+    expect(store.saveError).toBeNull()
+  })
+
+  it('does not report a write that landed after its sheet was swapped out', async () => {
+    vi.useFakeTimers()
+    vi.mocked(readSheet).mockResolvedValue(makeSheet('s13', 'Sheet'))
+    const store = useMindmapStore()
+    await store.open('s13')
+
+    let settle: (r: { ok: false, error: string }) => void = () => {}
+    vi.mocked(writeSheet).mockReturnValue(new Promise((resolve) => {
+      settle = resolve
+    }))
+    store.createChild('root')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(store.saveState).toBe('saving')
+
+    // The overlay closes while the write is in flight, then it fails. The
+    // failure belongs to a sheet nobody is looking at any more.
+    vi.mocked(writeSheet).mockResolvedValue({ ok: true })
+    await store.close()
+    settle({ ok: false, error: 'too late' })
+    await Promise.resolve()
+    expect(store.saveError).toBeNull()
   })
 })
 

@@ -6,6 +6,9 @@ import { DEFAULT_IMAGE_ASPECT, DEFAULT_IMAGE_WIDTH } from '../../../mindmap/node
 import { useMindmapStore } from '../../../mindmap/store'
 import { useStore } from '../../../store'
 import MindmapCanvas from './MindmapCanvas.vue'
+import MindmapCommandBar from './MindmapCommandBar.vue'
+import MindmapRelationPanel from './MindmapRelationPanel.vue'
+import MindmapTextToolbar from './MindmapTextToolbar.vue'
 
 const store = useStore()
 const mindmap = useMindmapStore()
@@ -75,7 +78,11 @@ function armFitBackstop() {
   }, 1500)
 }
 
-const selection = computed(() => mindmap.selection)
+// The toolbar acts on the PRIMARY selected topic — the last one selected —
+// which is also what the inspector below edits. S4 made the selection a list of
+// typed refs (topics, relationships, boundaries); everything here wants the one
+// topic in focus, so it reads the getter rather than the raw list.
+const selection = computed(() => mindmap.primaryNodeId)
 const canDelete = computed(() => {
   const sheet = mindmap.sheet
   return !!selection.value && !!sheet && selection.value !== sheet.rootNodeId
@@ -210,7 +217,7 @@ function addChild() {
   const parentId = selection.value ?? sheet.rootNodeId
   const id = mindmap.createChild(parentId)
   if (id) {
-    mindmap.select(id)
+    mindmap.select({ kind: 'node', id })
   }
 }
 
@@ -221,7 +228,7 @@ function addSibling() {
   }
   const created = mindmap.createSibling(id)
   if (created) {
-    mindmap.select(created)
+    mindmap.select({ kind: 'node', id: created })
   }
 }
 
@@ -300,14 +307,24 @@ onUnmounted(() => {
             Close
           </button>
         </div>
+        <!-- S4 Lane C: the save-state strip. Round 0 plumbed saveState and
+        saveError; this is what makes them visible. -->
+        <MindmapCommandBar />
       </div>
       <div ref="bodyRef" class="mindmap-body">
         <MindmapCanvas @settled="onMeasureSettled" />
+        <!-- S4 Lane A: the floating format bar, over the map, positioned on the
+        node being edited. Renders nothing until that lane fills it. -->
+        <MindmapTextToolbar />
       </div>
+      <!-- S4 Lane B: relationship and boundary controls, plus the map export
+      buttons. It has its own visibility rules (it also appears for a
+      multi-topic selection), so it sits OUTSIDE the style inspector's v-if. -->
+      <MindmapRelationPanel />
       <div v-if="selectedNode" class="mindmap-inspector">
         <div class="mindmap-inspector-head">
           <span>Style</span>
-          <button class="inspector-close" title="Close inspector" @click="mindmap.select(null)">
+          <button class="inspector-close" title="Close inspector" @click="mindmap.clearSelection()">
             X
           </button>
         </div>

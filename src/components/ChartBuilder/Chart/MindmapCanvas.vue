@@ -3,10 +3,14 @@ import type { NodeSize } from '../../../mindmap/layout'
 import type { MindNode } from '../../../mindmap/types'
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { cullNodes, sizeKey, type Viewport } from '../../../mindmap/cull'
-import { topicBoxStyle, topicImageBoxStyle } from '../../../mindmap/nodeStyle'
+import { topicBoxStyle } from '../../../mindmap/nodeStyle'
 import { useMindmapStore } from '../../../mindmap/store'
 import MindmapEdges from './MindmapEdges.vue'
+import MindmapGroups from './MindmapGroups.vue'
+import MindmapInteraction from './MindmapInteraction.vue'
 import MindmapNode from './MindmapNode.vue'
+import MindmapRelations from './MindmapRelations.vue'
+import MindmapTopicContent from './MindmapTopicContent.vue'
 
 // Fired once the measure queue has been emptied by a measurement pass — the
 // overlay's auto-fit signal. A sheet whose nodes carry imported positions is
@@ -354,6 +358,16 @@ onUnmounted(() => {
       @pointercancel="onGroundPointerEnd"
     />
     <div class="mindmap-world" :style="worldStyle">
+      <!-- Stacking order IS render order, and S4 fixes it: boundaries sit
+      beneath the tree so a group never hides the topics it encloses, and
+      relationships sit above the topics so their labels and arrowheads read.
+      Lane C owns this file but must not reorder these three (S4 §0.4). -->
+      <MindmapGroups
+        :nodes="store.visibleNodes"
+        :sizes="edgeSizes"
+        :viewport="viewportRect"
+        :margin="CULL_MARGIN / store.camera.scale"
+      />
       <MindmapEdges
         :nodes="store.visibleNodes"
         :sizes="edgeSizes"
@@ -364,6 +378,12 @@ onUnmounted(() => {
         v-for="node in renderedNodes"
         :key="node.id"
         :node="node"
+      />
+      <MindmapRelations
+        :nodes="store.visibleNodes"
+        :sizes="edgeSizes"
+        :viewport="viewportRect"
+        :margin="CULL_MARGIN / store.camera.scale"
       />
     </div>
     <!-- The hidden measure layer: OUTSIDE the transformed world so the camera
@@ -383,18 +403,18 @@ onUnmounted(() => {
         class="mindmap-node"
         :style="topicBoxStyle(node)"
       >
-        <!-- The image slot measures with the SAME box the rendered topic uses
-        (S3 C.2b) — but without a src: the box derives from Style numbers
-        alone, so measurement never waits on (or depends on) a load. -->
-        <img
-          v-if="topicImageBoxStyle(node)"
-          class="mindmap-node-image"
-          :style="topicImageBoxStyle(node)"
-          alt=""
-        >
-        <span class="mindmap-node-title">{{ node.title }}</span>
+        <!-- The SAME component the live topic renders (S4 Round 0 job 2). Two
+        hand-kept copies of this markup is how the measured box and the painted
+        box drift apart; `measuring` only skips resolving the image bytes, which
+        the box never depended on anyway (S3 C.2b). -->
+        <MindmapTopicContent :node="node" measuring />
       </div>
     </div>
+    <!-- The interaction controller: keyboard, node drag, marquee, drop
+    indicator and context menu (S4 Lane C). Last child so its transient
+    visuals paint over the map, and OUTSIDE the world because a marquee is
+    drawn in screen space. Renders nothing until Lane C fills it. -->
+    <MindmapInteraction :viewport="viewportRect" :sizes="edgeSizes" />
   </div>
 </template>
 

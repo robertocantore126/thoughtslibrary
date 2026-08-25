@@ -113,6 +113,24 @@ describe('sizeKey — box-affecting invalidation', () => {
     expect(sizeKey(a)).not.toBe(sizeKey(b))
   })
 
+  // S4 Round 0 job 3. Bolding one word leaves `title` byte-identical while the
+  // browser wraps the topic differently, so without the runs in the key the
+  // node keeps its stale box until an unrelated edit happens to repaint it.
+  it('changes when only the title RUNS change', () => {
+    const a = node('n', 0, 0, 50, 20, 'Bold plain')
+    const b = node('n', 0, 0, 50, 20, 'Bold plain')
+    a.titleRuns = [{ text: 'Bold', bold: true }, { text: ' plain' }]
+    b.titleRuns = [{ text: 'Bold plain' }]
+    expect(sizeKey(a)).not.toBe(sizeKey(b))
+  })
+
+  it('changes when runs appear on a title that had none', () => {
+    const a = node('n', 0, 0, 50, 20, 'Plain')
+    const b = node('n', 0, 0, 50, 20, 'Plain')
+    b.titleRuns = [{ text: 'Plain', bold: true }]
+    expect(sizeKey(a)).not.toBe(sizeKey(b))
+  })
+
   it('is stable when only a non-box-affecting field changes', () => {
     const a = node('n', 0, 0, 50, 20, 'Same', { opacity: 1 })
     const b = node('n', 0, 0, 50, 20, 'Same', { opacity: 0.5 })

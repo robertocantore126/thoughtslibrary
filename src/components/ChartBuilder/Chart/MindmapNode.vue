@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { MindNode } from '../../../mindmap/types'
-import { computed, nextTick, ref } from 'vue'
-import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
-import { topicBoxStyle, topicImageBoxStyle, topicVisualStyle } from '../../../mindmap/nodeStyle'
+import { computed, nextTick, ref, watch } from 'vue'
+import { topicBoxStyle, topicVisualStyle } from '../../../mindmap/nodeStyle'
 import { useMindmapStore } from '../../../mindmap/store'
+import MindmapTopicContent from './MindmapTopicContent.vue'
 
 // The canvas renders one of these per visible node. Position is per-instance
 // here; every box-affecting style comes from topicBoxStyle, the SAME helper the
@@ -17,15 +17,7 @@ const props = defineProps<{
 
 const store = useMindmapStore()
 
-const isSelected = computed(() => store.selection === props.node.id)
-
-// The TOP image slot (S3 C.1/C.2b): bytes resolve through the shared asset
-// store's object-URL cache; the BOX comes from topicImageBoxStyle and never
-// depends on whether the bytes have arrived — an <img> with explicit width
-// and height has that box before, during and after load, so what layout
-// measured is exactly what paints on every frame.
-const resolvedImage = useResolvedImageUrl(() => props.node.style.image)
-const imageBox = computed(() => topicImageBoxStyle(props.node))
+const isSelected = computed(() => store.isSelected({ kind: 'node', id: props.node.id }))
 
 const nodeStyle = computed(() => ({
   left: `${props.node.position.x}px`,
@@ -43,19 +35,25 @@ const nodeStyle = computed(() => ({
 const editor = ref<HTMLDivElement | null>(null)
 const editing = ref(false)
 
-async function startEdit() {
+// `seed` replaces the title outright and leaves the caret after it: that is
+// type-to-edit, where the character the user pressed IS the new title. Without
+// a seed the existing title is selected whole, because the user is about to
+// type a replacement and a caret stranded at the end of a long title is the one
+// place everyone immediately re-seeks.
+async function startEdit(seed = '') {
   editing.value = true
   await nextTick()
   const el = editor.value
   if (!el) {
     return
   }
-  el.textContent = props.node.title
+  el.textContent = seed || props.node.title
   el.focus()
-  // Select-all: the user is about to type a replacement, and a caret stranded
-  // at the end of a long title is the one place everyone immediately re-seeks.
   const range = document.createRange()
   range.selectNodeContents(el)
+  if (seed) {
+    range.collapse(false)
+  }
   const selection = window.getSelection()
   selection?.removeAllRanges()
   selection?.addRange(range)
@@ -94,12 +92,24 @@ function onEditorKeydown(event: KeyboardEvent) {
   }
 }
 
-function onNodeClick() {
+function onNodeClick(event: MouseEvent) {
   if (editing.value) {
     return
   }
-  store.select(props.node.id)
+  // Shift/Ctrl extends the selection; a plain click replaces it.
+  store.select({ kind: 'node', id: props.node.id }, event.shiftKey || event.ctrlKey || event.metaKey ? 'toggle' : 'replace')
 }
+
+// The one channel from the interaction controller into this editor (S4 §0.3):
+// type-to-edit, F2 and the context menu all set store.pendingEdit rather than
+// reaching into this component, and the matching node opens seeded with it.
+watch(() => store.pendingEdit, (pending) => {
+  if (pending?.nodeId !== props.node.id || editing.value) {
+    return
+  }
+  store.clearPendingEdit()
+  void startEdit(pending.seed)
+}, { immediate: true })
 
 function onNodeDblclick() {
   if (!editing.value) {
@@ -117,20 +127,13 @@ function toggleCollapsed() {
     class="mindmap-node"
     :class="{ selected: isSelected }"
     :style="nodeStyle"
+    :data-node-id="props.node.id"
     @click="onNodeClick"
     @dblclick="onNodeDblclick"
   >
-    <img
-      v-if="imageBox"
-      class="mindmap-node-image"
-      :src="resolvedImage"
-      :style="imageBox"
-      alt=""
-      draggable="false"
-    >
-    <span v-if="!editing" class="mindmap-node-title">{{ props.node.title }}</span>
+    <MindmapTopicContent :node="props.node" :hide-title="editing" />
     <div
-      v-else
+      v-if="editing"
       ref="editor"
       class="mindmap-node-editor"
       contenteditable="true"

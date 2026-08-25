@@ -12,6 +12,18 @@
 
 export const SCHEMA_VERSION = '0.1.0'
 
+/**
+ * What one entry of the store's selection points at. The map holds three kinds
+ * of selectable thing — topics, relationships and boundaries — and Delete has
+ * to act on the right one, so the kind travels with the id rather than being
+ * inferred by looking the id up in three collections and seeing which hits
+ * (S4 §0.3).
+ */
+export interface SelRef {
+  kind: 'node' | 'relationship' | 'group'
+  id: string
+}
+
 // ---------------------------------------------------------------------------
 // Core enums
 // ---------------------------------------------------------------------------
@@ -257,6 +269,12 @@ export interface TextRun {
   paraGap?: boolean
   /** >0 → this run starts a bullet-list item at this depth (1 = top level). */
   listIndent?: number
+  /**
+   * Struck through. It sits here rather than only on `Style` because a run is
+   * the level the user selects at: `Style.strikethrough` crosses out the whole
+   * topic, this crosses out the words they highlighted (S4 Lane A, T04).
+   */
+  strike?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +454,18 @@ export interface AttachmentInfo {
 
 export interface Sheet {
   sheetId: string
+  /**
+   * The SCHEMA_VERSION this sheet was last written under. Absent means it
+   * predates the field, which is every sheet stored before S4 — so a migration
+   * reads "absent" as "the oldest shape I know" rather than guessing.
+   *
+   * It exists now, while there is still nothing to migrate, because the
+   * alternative is adding it after a breaking change and having to infer the
+   * old shape from the data. It is a string to match SCHEMA_VERSION at the top
+   * of this file: a parallel numeric vocabulary for the same idea is how the
+   * two quietly disagree.
+   */
+  schemaVersion?: string
   title: string
   structure: StructureConfig
   rootNodeId: string

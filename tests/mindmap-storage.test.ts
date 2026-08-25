@@ -90,7 +90,7 @@ describe('missing IndexedDB', () => {
     Object.defineProperty(globalThis, 'indexedDB', { value: undefined, configurable: true })
     try {
       await expect(readSheet('x')).resolves.toBeNull()
-      await expect(writeSheet('x', blankSheet('t'))).resolves.toBeUndefined()
+      await expect(writeSheet('x', blankSheet('t'))).resolves.toEqual({ ok: false, error: 'Storage is unavailable' })
       await expect(deleteSheet('x')).resolves.toBeUndefined()
       await expect(listSheetIds()).resolves.toEqual([])
     }

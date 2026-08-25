@@ -116,6 +116,12 @@ export function sizeKey(node: MindNode): string {
   const s = node.style
   return JSON.stringify({
     title: node.title,
+    // The RUNS, not just the plain title (S4 Round 0 job 3). Bolding a word
+    // leaves `title` byte-identical while the browser wraps the topic wider —
+    // without this the node keeps its stale box until some unrelated edit
+    // happens to repaint it, which is the whole bug class the measure layer
+    // exists to close.
+    titleRuns: node.titleRuns,
     // Box-affecting Style fields (S2 M2). Miss one and that topic keeps a stale
     // size until some unrelated edit repaints it — the exact bug class the
     // measure layer exists to close. shape matters because the no-box shapes
