@@ -11,6 +11,7 @@ import type { MindNode, SelRef, Sheet, Style, TextRun } from './types'
  */
 import { defineStore, type StoreDefinition } from 'pinia'
 import { shallowRef } from 'vue'
+import { beginOp } from '../dev/traceCore'
 import { History } from './history'
 import { layoutSheet, type NodeSize } from './layout'
 import { applyWithInverse, makeOp, type Op } from './ops'
@@ -332,6 +333,10 @@ export const useMindmapStore = defineStore('mindmap', {
       // This call's ticket. Checked after every suspension below; see
       // sessionGeneration.
       const generation = ++sessionGeneration
+      // The span is a VALUE held across every await below. A global "current
+      // operation" would name whichever open started last, which is precisely
+      // wrong when two overlap — the only time this trace is worth reading.
+      const span = beginOp('OPEN', 'mindmap', { requested: sheetId, generation })
       const overtaken: OpenResult = { ok: false, error: 'A newer open replaced this one', superseded: true }
 
       // Commit whatever write is still pending to the sheet it belongs to
@@ -340,8 +345,10 @@ export const useMindmapStore = defineStore('mindmap', {
       // the sheet that replaces it. The write is AWAITED: flushSave normally
       // fires and forgets, but readSheet below would race it — a read that
       // wins returns the pre-edit sheet and the last edit silently vanishes.
-      await this.flushSave()
+      span.step('flush:previous')
+      await this.flushSave(span.id)
       if (generation !== sessionGeneration) {
+        span.stale({ at: 'after-flush', generation, now: sessionGeneration })
         return overtaken
       }
 
@@ -353,8 +360,13 @@ export const useMindmapStore = defineStore('mindmap', {
         created = true
       }
       else {
+        span.step('read:start', { sheetId })
         const result = await readSheetResult(sheetId)
+        span.step('read:end', { kind: result.kind })
         if (generation !== sessionGeneration) {
+          // The shape the whole design exists to make visible: this operation
+          // finished, correctly, into a world that had already moved on.
+          span.stale({ at: 'after-read', generation, now: sessionGeneration, requested: sheetId })
           return overtaken
         }
         if (result.kind === 'ok') {
@@ -375,6 +387,7 @@ export const useMindmapStore = defineStore('mindmap', {
           // the real one sat on disk, unreferenced. Refuse instead, and leave
           // every byte of state alone so nothing has moved on when the caller
           // decides what to say.
+          span.refused({ reason: result.kind, error: result.error })
           return { ok: false, error: result.error, superseded: false }
         }
       }
@@ -383,15 +396,17 @@ export const useMindmapStore = defineStore('mindmap', {
       // the write fails there is nothing worth opening: publishing it anyway
       // would show a map that vanishes on the next reload.
       if (created) {
-        const write = await writeSheet(sheet.sheetId, sheet)
+        const write = await writeSheet(sheet.sheetId, sheet, span.id)
         if (generation !== sessionGeneration) {
           // Overtaken while the fresh sheet was being written. It is on disk
           // and nothing references it — an orphan the sweep cannot see, since
           // it collects image blobs and not sheets. Rare enough to accept and
           // small enough not to chase with a delete that could itself race.
+          span.stale({ at: 'after-create-write', generation, now: sessionGeneration, orphanedSheetId: sheet.sheetId })
           return overtaken
         }
         if (!write.ok) {
+          span.refused({ reason: 'create-write-failed', error: write.error })
           return { ok: false, error: write.error, superseded: false }
         }
       }
@@ -410,6 +425,7 @@ export const useMindmapStore = defineStore('mindmap', {
       // `this.sheet` afterwards: a caller that awaits open() and then reads the
       // store singleton is reading whatever the LAST open put there, which on
       // a fast tile switch is a different map's id.
+      span.end({ published: sheet.sheetId, created, nodes: Object.keys(sheet.nodes).length })
       return { ok: true, created, sheetId: sheet.sheetId }
     },
     async close() {
@@ -420,14 +436,18 @@ export const useMindmapStore = defineStore('mindmap', {
       // The last edit must survive the overlay closing even if its debounce
       // never fired; flush, then drop the sheet.
       const closingId = this.sheet?.sheetId ?? null
-      await this.flushSave()
+      const span = beginOp('CLOSE', 'mindmap', { closing: closingId })
+      span.step('flush')
+      await this.flushSave(span.id)
       // Generation guard: close() awaits the flush, and nothing today can
       // swap the sheet while it is in flight (the overlay is modal). The day
       // a switch-map path exists, an in-flight close must not null the sheet
       // an open() just put in place — bail if it changed under us.
       if ((this.sheet?.sheetId ?? null) !== closingId) {
+        span.stale({ closing: closingId, now: this.sheet?.sheetId ?? null })
         return
       }
+      span.step('dispose')
       history.clear()
       this.sheet = null
       this.selection = []
@@ -438,6 +458,7 @@ export const useMindmapStore = defineStore('mindmap', {
       this.saveState = 'clean'
       this.saveError = null
       this.camera = { x: 0, y: 0, scale: 1 }
+      span.end({ closed: closingId })
     },
     // Lane E measured the DOM and hands the sizes over. Layout runs here
     // because it is derived data — it never enters an op and never enters
@@ -792,7 +813,7 @@ export const useMindmapStore = defineStore('mindmap', {
     // must not take the UI down with it — but it is now RECORDED rather than
     // swallowed. Returns a promise so open()/close() can await the write
     // before a read or teardown depends on it.
-    flushSave(): Promise<void> {
+    flushSave(parentId?: string): Promise<void> {
       if (saveTimer) {
         clearTimeout(saveTimer)
         saveTimer = null
@@ -802,16 +823,24 @@ export const useMindmapStore = defineStore('mindmap', {
         return Promise.resolve()
       }
       this.saveState = 'saving'
-      return writeSheet(sheet.sheetId, sheet)
+      const span = beginOp('SAVE', 'persist', { sheetId: sheet.sheetId }, parentId)
+      return writeSheet(sheet.sheetId, sheet, span.id)
         .then((result) => {
           // The sheet may have been swapped or closed while the write was in
           // flight; reporting "saved" then would describe a sheet that is no
           // longer open.
           if (this.sheet?.sheetId === sheet.sheetId) {
             this.recordWrite(result)
+            span.end({ ok: result.ok })
+          }
+          else {
+            // Landed under a different sheet: the result is real but it no
+            // longer describes what is open.
+            span.stale({ saved: sheet.sheetId, now: this.sheet?.sheetId ?? null, ok: result.ok })
           }
         })
         .catch((error: unknown) => {
+          span.error({ message: error instanceof Error ? error.message : 'Save failed' })
           if (this.sheet?.sheetId === sheet.sheetId) {
             this.recordWrite({ ok: false, error: error instanceof Error ? error.message : 'Save failed' })
           }

@@ -155,7 +155,7 @@ describe('mindmap store — open and history', () => {
     expect(store.sheet).not.toBeNull()
     expect(store.sheet.rootNodeId).toBeTruthy()
     expect(vi.mocked(blankSheet)).toHaveBeenCalledWith('Untitled')
-    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith(store.sheet.sheetId, store.sheet)
+    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith(store.sheet.sheetId, store.sheet, expect.any(String))
   })
 
   it('open() with an unknown id creates a blank sheet in its place', async () => {
@@ -179,7 +179,7 @@ describe('mindmap store — open and history', () => {
     await store.close()
 
     expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s8', expect.anything())
+    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s8', expect.anything(), expect.any(String))
     expect(store.sheet).toBeNull()
     expect(store.selection).toEqual([])
     expect(store.undo()).toBe(false)
@@ -362,7 +362,7 @@ describe('mindmap store — layout bridge', () => {
 
     await vi.advanceTimersByTimeAsync(500)
     expect(vi.mocked(writeSheet)).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s7', store.sheet)
+    expect(vi.mocked(writeSheet)).toHaveBeenCalledWith('s7', store.sheet, expect.any(String))
   })
 
   // S4 Round 0 job 5. Before it, writeSheet resolved identically whether or not

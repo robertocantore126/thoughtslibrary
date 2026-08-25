@@ -26,23 +26,28 @@
  */
 
 import type { Chart } from '../types'
+import type { Subsystem, TraceEvent } from './traceCore'
 import { collectChartAssetIds, collectSheetAssetIds, listAssetIds } from '../helpers/assets'
 import { summariseChart } from '../helpers/exportTrace'
 import { listSheetIds, readSheetResult } from '../mindmap/storage'
+import {
+  causalChain,
+  clearEvents,
+  events as coreEvents,
+  droppedCount,
+  emit,
+  formatEvent,
+  getLevel,
+  isBugHunt,
+  setBugHunt,
+  setLevel,
+} from './traceCore'
 
-const CAPACITY = 300
 const TRACE_GLOBAL = '__tracer'
 
-export type Subsystem = 'ui' | 'chart' | 'mindmap' | 'persist' | 'assets' | 'err'
+export type { Subsystem, TraceEvent } from './traceCore'
 
 export type Severity = 'error' | 'warning' | 'info'
-
-export interface TraceEvent {
-  t: number
-  sub: Subsystem
-  what: string
-  detail?: Record<string, unknown>
-}
 
 export interface Problem {
   /** Stable slug, so the same defect reads the same across two captures. */
@@ -56,21 +61,6 @@ export interface Problem {
   detail?: Record<string, unknown>
 }
 
-const t0 = typeof performance !== 'undefined' ? performance.now() : 0
-const buffer: TraceEvent[] = []
-
-function now(): number {
-  return Math.round(((typeof performance !== 'undefined' ? performance.now() : 0) - t0) * 10) / 10
-}
-
-/** Records an event. Oldest fall off the front; the tail is what matters. */
-export function record(sub: Subsystem, what: string, detail?: Record<string, unknown>): void {
-  buffer.push({ t: now(), sub, what, detail })
-  if (buffer.length > CAPACITY) {
-    buffer.splice(0, buffer.length - CAPACITY)
-  }
-}
-
 function serialiseError(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
     return { message: error.message, stack: error.stack?.split('\n').slice(0, 6).join('\n') }
@@ -78,14 +68,28 @@ function serialiseError(error: unknown): Record<string, unknown> {
   return { message: String(error) }
 }
 
+/** Records a free-standing event, for callers with no span to hang it on. */
+export function record(sub: Subsystem, what: string, detail?: Record<string, unknown>): void {
+  emit(sub, what, detail)
+}
+
 export const tracer = {
   record,
   buildReport,
   download,
-  events: () => [...buffer],
+  events: coreEvents,
+  dropped: droppedCount,
+  /** Every event of one operation and everything it caused. */
+  chain: (traceId: string) => causalChain(traceId),
+  /** The same chain, one line per event, for reading in a console. */
+  print: (traceId: string) => causalChain(traceId).map(formatEvent).join('\n'),
+  setLevel,
+  getLevel,
+  setBugHunt,
+  isBugHunt,
   clear: () => {
-    buffer.length = 0
-    record('ui', 'trace:cleared')
+    clearEvents()
+    emit('ui', 'trace:cleared')
   },
 }
 
@@ -106,29 +110,29 @@ export function installTrace(win: Window = window): void {
   installed = true
 
   win.addEventListener('error', (event) => {
-    record('err', 'window:error', {
+    emit('err', 'window:error', {
       message: event.message,
       source: `${event.filename}:${event.lineno}`,
     })
   })
 
   win.addEventListener('unhandledrejection', (event) => {
-    record('err', 'unhandled:rejection', serialiseError(event.reason))
+    emit('err', 'unhandled:rejection', serialiseError(event.reason))
   })
 
   const realError = console.error.bind(console)
   console.error = (...args: unknown[]) => {
-    record('err', 'console:error', { text: args.map(a => String(a)).join(' ').slice(0, 400) })
+    emit('err', 'console:error', { text: args.map(a => String(a)).join(' ').slice(0, 400) })
     realError(...args)
   }
 
   const realWarn = console.warn.bind(console)
   console.warn = (...args: unknown[]) => {
-    record('err', 'console:warn', { text: args.map(a => String(a)).join(' ').slice(0, 400) })
+    emit('err', 'console:warn', { text: args.map(a => String(a)).join(' ').slice(0, 400) })
     realWarn(...args)
   }
 
-  record('ui', 'trace:installed')
+  emit('ui', 'trace:installed', { level: getLevel(), bugHunt: isBugHunt() })
   ;(win as Window & { [TRACE_GLOBAL]?: unknown })[TRACE_GLOBAL] = tracer
 }
 
@@ -516,25 +520,73 @@ export async function buildReport(input: AuditInput): Promise<TraceReport> {
     saveError: input.saveError ?? null,
   }
 
+  // Anything the trace already recorded as gone wrong is promoted into
+  // `problems`, so the reader never has to scan the event list to find out
+  // that an operation was overtaken or that a write went to the wrong key.
+  const recorded = coreEvents()
+  for (const event of recorded) {
+    if (event.phase === 'stale') {
+      problems.push({
+        id: 'async-stale-result',
+        sub: event.sub,
+        severity: 'warning',
+        message: `${event.traceId} finished after something else had taken its place.`,
+        where: 'see events with this traceId',
+        detail: { seq: event.seq, traceId: event.traceId, ...event.detail },
+      })
+    }
+    if (event.what === 'persistence:identity-mismatch') {
+      problems.push({
+        id: 'persistence-identity-mismatch',
+        sub: 'persist',
+        severity: 'error',
+        message: 'A sheet was written under a key that is not its own id.',
+        where: 'src/mindmap/storage.ts (writeSheet)',
+        detail: { seq: event.seq, ...event.detail },
+      })
+    }
+  }
+
+  // Operations that started and never reported an end: either still running
+  // when the capture was taken, or dropped on the floor.
+  const ended = new Set(recorded.filter(e => e.phase && e.phase !== 'start' && e.phase !== 'step').map(e => e.traceId))
+  const unfinished = recorded
+    .filter(e => e.phase === 'start' && e.traceId && !ended.has(e.traceId))
+    .map(e => e.traceId as string)
+  if (unfinished.length > 0) {
+    problems.push({
+      id: 'operations-never-finished',
+      sub: 'err',
+      severity: 'info',
+      message: `${unfinished.length} operation(s) started but never reported an end.`,
+      detail: { traceIds: unfinished.slice(0, 20) },
+    })
+  }
+
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 }
   problems.sort((a, b) => order[a.severity] - order[b.severity])
 
   return {
     meta: {
       capturedAt: new Date().toISOString(),
-      sinceLoadMs: now(),
       // The report is read cold: whether this ran in Electron or a browser tab
       // decides which half of the save path was even reachable.
       runtime: (window as Window & { electronAPI?: unknown }).electronAPI ? 'electron' : 'browser',
       url: window.location.href,
       userAgent: navigator.userAgent,
       viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio },
+      level: getLevel(),
+      bugHunt: isBugHunt(),
       problemCount: problems.length,
       errorCount: problems.filter(p => p.severity === 'error').length,
+      eventCount: recorded.length,
+      // A truncated trace that does not say it is truncated lies by omission:
+      // the reader takes the oldest event for the beginning.
+      eventsDropped: droppedCount(),
     },
     problems,
     snapshot,
-    events: [...buffer],
+    events: recorded,
   }
 }
 

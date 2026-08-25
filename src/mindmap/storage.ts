@@ -11,6 +11,7 @@
  * to null / [] / undefined and the app keeps working without persistence
  * rather than dying at startup.
  */
+import { beginOp, emit } from '../dev/traceCore'
 import { DEFAULT_STRUCTURE, type MindNode, SCHEMA_VERSION, type Sheet } from './types'
 
 const DB_NAME = 'thoughtslibrary-mindmaps'
@@ -331,12 +332,30 @@ export async function readSheet(id: string): Promise<Sheet | null> {
 // `result.error` fails to narrow in the else branch.
 export type WriteResult = { ok: true, error?: undefined } | { ok: false, error: string }
 
-export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult> {
+export async function writeSheet(id: string, sheet: Sheet, parentId?: string): Promise<WriteResult> {
+  const span = beginOp('WRITE', 'persist', {
+    key: id,
+    nodes: Object.keys(sheet.nodes || {}).length,
+    relationships: sheet.relationships?.length ?? 0,
+  }, parentId)
+
+  // The key IS the identity. Caught here rather than only in the audit, so the
+  // trace shows the MOMENT the two diverged instead of the fact that they have.
+  // Reported, never corrected: writing to a different key than the caller asked
+  // for would be the tracer changing behaviour.
+  if (sheet.sheetId !== id) {
+    emit('persist', 'persistence:identity-mismatch', {
+      storageKey: id,
+      documentSheetId: sheet.sheetId,
+    }, { traceId: span.id, phase: 'error', min: 'error' })
+  }
+
   const db = await openDb()
   if (!db) {
     // The sheet itself is never cached in memory for later retry — degrade
     // loudly rather than pretend the edit was saved.
     console.error('IndexedDB is unavailable; mindmap changes are not being saved')
+    span.error({ reason: 'unavailable' })
     return { ok: false, error: 'Storage is unavailable' }
   }
 
@@ -352,10 +371,12 @@ export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult>
       // store that vanished under a version change), and that path never
       // reached the handlers below.
       console.error('Failed to open a mindmap write transaction:', error)
+      span.error({ reason: 'transaction-open-threw' })
       resolve({ ok: false, error: describeWriteError(error) })
       return
     }
     transaction.oncomplete = () => {
+      span.end({ ok: true })
       resolve({ ok: true })
     }
     request.onerror = () => {
@@ -363,14 +384,17 @@ export async function writeSheet(id: string, sheet: Sheet): Promise<WriteResult>
       // editing, the next debounced write tries again — but the failure is
       // now reported rather than swallowed.
       console.error('Failed to write mindmap sheet:', request.error)
+      span.error({ reason: 'request', name: request.error?.name })
       resolve({ ok: false, error: describeWriteError(request.error) })
     }
     transaction.onerror = () => {
       console.error('Failed to commit mindmap sheet:', transaction.error)
+      span.error({ reason: 'commit', name: transaction.error?.name })
       resolve({ ok: false, error: describeWriteError(transaction.error) })
     }
     transaction.onabort = () => {
       console.error('Mindmap sheet transaction aborted:', transaction.error)
+      span.error({ reason: 'abort', name: transaction.error?.name })
       resolve({ ok: false, error: describeWriteError(transaction.error) })
     }
   })
