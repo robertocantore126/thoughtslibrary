@@ -1,4 +1,5 @@
 import type { Sheet } from '../src/mindmap/types'
+import { Buffer } from 'node:buffer'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   collectChartAssetIds,
