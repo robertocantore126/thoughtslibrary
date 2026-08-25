@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { Style } from '../../../mindmap/types'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { storeLocalImage } from '../../../helpers/assets'
+import { DEFAULT_IMAGE_ASPECT, DEFAULT_IMAGE_WIDTH } from '../../../mindmap/nodeStyle'
 import { useMindmapStore } from '../../../mindmap/store'
 import { useStore } from '../../../store'
 import MindmapCanvas from './MindmapCanvas.vue'
@@ -126,6 +128,78 @@ function clearStyle(...fields: (keyof Style)[]) {
     return
   }
   mindmap.clearNodeStyle(node.id, fields)
+}
+
+// ---------------------------------------------------------------------------
+// S3 C.3 — the topic image
+// ---------------------------------------------------------------------------
+// Add / replace / remove a topic's TOP image, plus its display width. Every
+// change is a setNodeStyle/clearNodeStyle op, so Ctrl+Z undoes adding or
+// removing an image like any other edit. Removing clears image, imageWidth
+// AND imageAspect together — a leftover aspect on a node with no image is a
+// trap for whatever reads it next.
+//
+// The aspect is read here, ONCE, when the picture is picked (S3 C.2b): the
+// asset store keeps only bytes, so h/w must be captured at authoring time for
+// the topic box to be computable without loading anything.
+const imageInput = ref<HTMLInputElement | null>(null)
+const imageError = ref('')
+const defaultImageWidth = DEFAULT_IMAGE_WIDTH
+
+function pickImage() {
+  imageError.value = ''
+  imageInput.value?.click()
+}
+
+function removeImage() {
+  clearStyle('image', 'imageWidth', 'imageAspect')
+}
+
+function readImageAspect(file: Blob): Promise<number> {
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl)
+      resolve(img.naturalHeight / Math.max(1, img.naturalWidth))
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      resolve(DEFAULT_IMAGE_ASPECT)
+    }
+    img.src = objectUrl
+  })
+}
+
+async function onImagePicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  // Reset so picking the same file again still fires change.
+  input.value = ''
+  const nodeAtPick = selectedNode.value
+  if (!file || !nodeAtPick) {
+    return
+  }
+  try {
+    // One asset store, one URL convention (S3 C.1): local-asset:// into the
+    // shared store, exactly like tile covers — never a second image path.
+    const url = await storeLocalImage(file)
+    const aspect = await readImageAspect(file)
+    // The picker can outlive a selection change; re-check before writing.
+    const node = selectedNode.value ?? nodeAtPick
+    if (!node) {
+      return
+    }
+    const patch: Partial<Style> = { image: url, imageAspect: aspect }
+    if (node.style.imageWidth === undefined) {
+      patch.imageWidth = DEFAULT_IMAGE_WIDTH
+    }
+    mindmap.setNodeStyle(node.id, patch)
+  }
+  catch (error) {
+    console.error('Could not attach the image:', error)
+    imageError.value = 'Could not attach that image.'
+  }
 }
 
 function addChild() {
@@ -433,6 +507,48 @@ onUnmounted(() => {
             </select>
           </div>
         </div>
+
+        <!-- S3 C.3 — the topic image. Add/replace/remove plus display width;
+        every control routes through setNodeStyle/clearNodeStyle ops. -->
+        <div class="inspector-section">
+          <div class="inspector-row">
+            <label>Image</label>
+            <button class="inspector-image-btn" @click="pickImage">
+              {{ selectedNode.style.image ? 'Replace…' : 'Add…' }}
+            </button>
+            <button
+              v-if="selectedNode.style.image"
+              class="inspector-reset"
+              title="Remove the image (Ctrl+Z restores it)"
+              @click="removeImage"
+            >
+              ✕
+            </button>
+          </div>
+          <div class="inspector-row">
+            <label>Img width</label>
+            <input
+              class="inspector-num"
+              type="number"
+              min="24"
+              max="480"
+              step="8"
+              :disabled="!selectedNode.style.image"
+              :value="selectedNode.style.imageWidth ?? defaultImageWidth"
+              @change="applyStyle('imageWidth', Number(($event.target as HTMLInputElement).value))"
+            >
+          </div>
+          <p v-if="imageError" class="inspector-image-error" role="alert">
+            {{ imageError }}
+          </p>
+          <input
+            ref="imageInput"
+            type="file"
+            accept="image/*"
+            class="inspector-file"
+            @change="onImagePicked"
+          >
+        </div>
       </div>
     </div>
   </div>
@@ -633,5 +749,31 @@ onUnmounted(() => {
 
 .inspector-check span {
   flex: 1;
+}
+
+.inspector-image-btn {
+  flex: 1;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  border-radius: 4px;
+  padding: 3px 5px;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.inspector-image-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* The picker itself is never visible; the Add…/Replace… button drives it. */
+.inspector-file {
+  display: none;
+}
+
+.inspector-image-error {
+  margin: 4px 0 0;
+  color: #ff7f50;
 }
 </style>

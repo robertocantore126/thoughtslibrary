@@ -1,3 +1,5 @@
+import type { Sheet } from './mindmap/types'
+
 export interface ChartItem {
   id: string // NEW — uuid v4, required on every item
   title: string
@@ -62,6 +64,15 @@ export interface Chart {
   // sheet — the bytes live in the mindmaps IndexedDB store, because a chart
   // goes to localStorage and one 400-topic map would eat the whole quota.
   mindmaps?: Record<string, string>
+  // Present ONLY in an exported or file-saved chart, never in localStorage:
+  // the sheets themselves, keyed by the ids `mindmaps` points at. Out-of-line
+  // while live, inline in the file — the same rule the tile covers follow,
+  // because a file has to open on a machine that has never seen this one.
+  mindmapSheets?: Record<string, Sheet>
+  // assetId → data: URI. Export-only, like mindmapSheets: every image a
+  // carried sheet references, keyed by its local-asset id and shared across
+  // sheets so a picture used by two maps travels once.
+  mindmapAssets?: Record<string, string>
   links?: TileLink[] // arrows between tiles, by ChartItem.id
   items: Array<ChartItem | null>
   size: ChartSize

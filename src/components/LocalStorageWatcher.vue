@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Chart } from '../types'
 import { onMounted, ref } from 'vue'
-import { collectChartAssetIds, collectUnusedAssets, persistChartAssets } from '../helpers/assets'
+import { collectChartAssetIds, collectSheetAssetIds, collectUnusedAssets, persistChartAssets } from '../helpers/assets'
 import { initializeFirstRun } from '../helpers/chart'
 import { adoptChartCovers, collectAdoptableAssets } from '../helpers/coverAdoption'
 import {
@@ -16,6 +16,7 @@ import {
   updateStoredChart,
 } from '../helpers/localStorage'
 import { detectOtherWindows, reportPersistFailure, reportPersistSuccess } from '../helpers/persistStatus'
+import { readSheet } from '../mindmap/storage'
 import { useStore } from '../store'
 
 const store = useStore()
@@ -166,14 +167,28 @@ async function loadStoredCharts() {
     }
     else {
       const referenced = new Set<string>()
+      let sheetReadFailed = false
       for (const [, chart] of normalizedEntries) {
         collectChartAssetIds(chart.data, referenced)
+        // Mindmap topics reference asset blobs of their own (S3 Part B), so
+        // every sheet of every stored chart joins the root set — not just the
+        // active one; the sweep runs across all charts.
+        for (const sheetId of Object.values(chart.data?.mindmaps ?? {})) {
+          const sheet = await readSheet(sheetId)
+          if (!sheet) {
+            sheetReadFailed = true
+            continue
+          }
+          collectSheetAssetIds(sheet, referenced)
+        }
       }
       // An entry that could not be read contributes no references, and a sweep
       // that cannot see a chart's references would delete its images. Better to
       // reclaim nothing this run than to collect against an incomplete root set.
-      if (normalizedEntries.some(([, chart]) => !chart?.data)) {
-        throw new Error('A chart could not be read; skipping the sweep rather than collecting against an incomplete root set')
+      // A sheet that fails to read is exactly the same hazard: its images would
+      // look orphaned from here while their topics still point at them.
+      if (sheetReadFailed || normalizedEntries.some(([, chart]) => !chart?.data)) {
+        throw new Error('A chart or sheet could not be read; skipping the sweep rather than collecting against an incomplete root set')
       }
       await collectUnusedAssets(referenced)
     }

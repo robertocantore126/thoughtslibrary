@@ -1,6 +1,12 @@
 import type { CSSProperties } from 'vue'
 import { DEFAULT_STYLE, type MindNode } from './types'
 
+/** Display width used when a topic carries an image but no explicit width. */
+export const DEFAULT_IMAGE_WIDTH = 120
+
+/** Assumed height/width for an image whose aspect was never recorded. */
+export const DEFAULT_IMAGE_ASPECT = 0.75
+
 /**
  * Box-affecting Style → inline CSS, SHARED between the rendered topic
  * (MindmapNode.vue) and the hidden measure layer (MindmapCanvas.vue).
@@ -106,4 +112,30 @@ export function topicVisualStyle(node: MindNode): CSSProperties {
   }
 
   return style
+}
+
+/**
+ * The TOP image slot's box, derived from `imageWidth` × `imageAspect` alone —
+ * the S3 C.2b async-input rule. An `<img>` measured before it loads is
+ * zero-height, and a topic sized by whatever happens to have loaded is the
+ * pan-shift bug arriving once more: so the box comes purely from stored Style
+ * numbers and is correct on the FIRST frame, identical before and after the
+ * bytes arrive. Both the rendered topic and the hidden measure layer call
+ * this, so what layout reads is exactly what paints.
+ *
+ * Returns null for a topic with no image; the caller renders no slot.
+ */
+export function topicImageBoxStyle(node: MindNode): CSSProperties | null {
+  const s = node.style
+  if (!s.image) {
+    return null
+  }
+  const width = Math.max(1, Math.round(s.imageWidth ?? DEFAULT_IMAGE_WIDTH))
+  const height = Math.max(1, Math.round(width * (s.imageAspect ?? DEFAULT_IMAGE_ASPECT)))
+  return {
+    display: 'block',
+    width: `${width}px`,
+    height: `${height}px`,
+    objectFit: 'cover',
+  }
 }

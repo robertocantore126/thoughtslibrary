@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { MindNode } from '../../../mindmap/types'
 import { computed, nextTick, ref } from 'vue'
-import { topicBoxStyle, topicVisualStyle } from '../../../mindmap/nodeStyle'
+import { useResolvedImageUrl } from '../../../composables/useResolvedImageUrl'
+import { topicBoxStyle, topicImageBoxStyle, topicVisualStyle } from '../../../mindmap/nodeStyle'
 import { useMindmapStore } from '../../../mindmap/store'
 
 // The canvas renders one of these per visible node. Position is per-instance
@@ -17,6 +18,14 @@ const props = defineProps<{
 const store = useMindmapStore()
 
 const isSelected = computed(() => store.selection === props.node.id)
+
+// The TOP image slot (S3 C.1/C.2b): bytes resolve through the shared asset
+// store's object-URL cache; the BOX comes from topicImageBoxStyle and never
+// depends on whether the bytes have arrived — an <img> with explicit width
+// and height has that box before, during and after load, so what layout
+// measured is exactly what paints on every frame.
+const resolvedImage = useResolvedImageUrl(() => props.node.style.image)
+const imageBox = computed(() => topicImageBoxStyle(props.node))
 
 const nodeStyle = computed(() => ({
   left: `${props.node.position.x}px`,
@@ -111,6 +120,14 @@ function toggleCollapsed() {
     @click="onNodeClick"
     @dblclick="onNodeDblclick"
   >
+    <img
+      v-if="imageBox"
+      class="mindmap-node-image"
+      :src="resolvedImage"
+      :style="imageBox"
+      alt=""
+      draggable="false"
+    >
     <span v-if="!editing" class="mindmap-node-title">{{ props.node.title }}</span>
     <div
       v-else

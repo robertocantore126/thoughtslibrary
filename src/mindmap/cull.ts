@@ -130,5 +130,12 @@ export function sizeKey(node: MindNode): string {
     padding: s.padding,
     shape: s.shape,
     fontFamily: s.fontFamily,
+    // Image fields (S3 C.2b): the topic box includes the image slot, whose
+    // size is imageWidth × imageAspect — so a resize re-measures, and adding
+    // or removing the image changes the key even when width/aspect keep
+    // their previous values.
+    hasImage: !!s.image,
+    imageWidth: s.imageWidth,
+    imageAspect: s.imageAspect,
   })
 }

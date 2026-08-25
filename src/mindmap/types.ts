@@ -114,10 +114,18 @@ export interface Style {
   shadow?: boolean
   icon?: string
   /**
-   * Attachment id of the TOP image (kept as `image` for backwards
-   * compatibility with every saved document, op and export that predates
-   * the side slots). The other three slots live in imageBottom/Left/Right
-   * and all four share `imageWidth` as their display size.
+   * The TOP image (kept as `image` for backwards compatibility with every
+   * saved document, op and export that predates the side slots). The other
+   * three slots live in imageBottom/Left/Right and all four share
+   * `imageWidth` as their display size.
+   *
+   * This holds a host-store URL — `local-asset://<uuid>` into the shared
+   * asset store, the exact convention ChartItem.coverURL uses — NOT the
+   * r-node SHA-256 asset id the ported schema originally described. That is
+   * a deliberate divergence: r-node content-addresses because it owns its
+   * own asset store; here the host's store already exists with its own URL
+   * convention, orphan sweep and export path, and a second image path would
+   * be a second thing to keep in step (S3 C.1, §T.7).
    */
   image?: string
   imageBottom?: string
@@ -125,6 +133,20 @@ export interface Style {
   imageRight?: string
   /** Display width of the image(s) in world units; height follows the aspect ratio. */
   imageWidth?: number
+  /**
+   * Height ÷ width of the source picture, read ONCE when the image is added
+   * and stored on the node. r-node does not need this field because its
+   * AssetMeta carries w/h beside the bytes; this repo's asset store keeps
+   * only the blob and a write timestamp, so the aspect has to travel with
+   * the node that shows it.
+   *
+   * It exists for the async-input rule (S3 C.2b): a layout input must be
+   * knowable without waiting for anything async, so the topic box is derived
+   * from imageWidth × imageAspect alone and is correct on the first frame —
+   * an <img> measured before it loads must never be the thing that sizes a
+   * topic. Absent = DEFAULT_IMAGE_ASPECT.
+   */
+  imageAspect?: number
   /**
    * Turns the topic into a GALLERY (T25): an ordered grid of captioned images
    * filling the body under the title — a tier-list row, a mood board, a cast

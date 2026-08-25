@@ -3,7 +3,7 @@ import type { NodeSize } from '../../../mindmap/layout'
 import type { MindNode } from '../../../mindmap/types'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { cullNodes, sizeKey, type Viewport } from '../../../mindmap/cull'
-import { topicBoxStyle } from '../../../mindmap/nodeStyle'
+import { topicBoxStyle, topicImageBoxStyle } from '../../../mindmap/nodeStyle'
 import { useMindmapStore } from '../../../mindmap/store'
 import MindmapEdges from './MindmapEdges.vue'
 import MindmapNode from './MindmapNode.vue'
@@ -162,11 +162,45 @@ function sizesForLayout(): Record<string, NodeSize> {
 // depends on it, so flipping it must bump that computed.
 const hasLayout = ref(false)
 
+// ---------------------------------------------------------------------------
+// Fonts: the other async input (S3 C.2a)
+// ---------------------------------------------------------------------------
+// index.html loads the app font with display=swap, so the browser paints a
+// fallback face first and switches to Nunito when it arrives. Every box
+// measured before the switch is sized for metrics that are about to change,
+// and nothing used to re-measure afterwards — a cold load laid topics out for
+// the wrong font, a warm cache for the right one. Same async-input rule as
+// images below: a layout input must be knowable without waiting for anything
+// async, so either wait or invalidate.
+//
+// A missing document.fonts (node test runner, old engines) counts as "fonts
+// are ready".
+let fontsWatched = false
+function ensureFontsReady(): Promise<void> {
+  if (typeof document === 'undefined' || !document.fonts) {
+    return Promise.resolve()
+  }
+  if (!fontsWatched) {
+    fontsWatched = true
+    // A face can arrive even AFTER ready resolves, when a family/weight gets
+    // requested later. Drop every cached size when one does: unmeasuredNodes
+    // repopulates and the watcher below re-reads them against real metrics.
+    // Fires only when something actually loaded, so this converges.
+    document.fonts.onloadingdone = () => {
+      sizeCache.value = {}
+    }
+  }
+  return document.fonts.ready.then(() => {})
+}
+
 // Measurement order matters (§T.4): read ALL box sizes in one pass, THEN hand
 // the batch to the store. Interleaving read/write per node forces reflow per
 // node and turns a 3,000-topic map into thousands of synchronous layouts.
 // flush: 'post' so the measure layer has painted before its boxes are read.
 async function syncMeasure() {
+  // The web font must have swapped (or be known-absent) before the first box
+  // is read, or the whole first layout runs on fallback metrics.
+  await ensureFontsReady()
   await nextTick()
   let changed = false
   for (const node of unmeasuredNodes.value) {
@@ -331,6 +365,15 @@ onUnmounted(() => {
         class="mindmap-node"
         :style="topicBoxStyle(node)"
       >
+        <!-- The image slot measures with the SAME box the rendered topic uses
+        (S3 C.2b) — but without a src: the box derives from Style numbers
+        alone, so measurement never waits on (or depends on) a load. -->
+        <img
+          v-if="topicImageBoxStyle(node)"
+          class="mindmap-node-image"
+          :style="topicImageBoxStyle(node)"
+          alt=""
+        >
         <span class="mindmap-node-title">{{ node.title }}</span>
       </div>
     </div>

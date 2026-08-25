@@ -1,4 +1,6 @@
+import type { Sheet, Style } from '../mindmap/types'
 import type { Chart, ChartCoordinates, ChartItem, RelatedLayer, StoredChart } from '../types'
+import { readSheet, writeSheet } from '../mindmap/storage'
 import { INLINE_ASSET_BUDGET, optimizeImageBlob, readBlobAsDataUrl, STORED_ASSET_BUDGET } from './files'
 
 const DB_NAME = 'thoughtslibrary-assets'
@@ -364,6 +366,45 @@ export function collectChartAssetIds(chart: Chart | undefined, into: Set<string>
   return into
 }
 
+// Every local-asset id a SHEET still points at — the one place that answers
+// "what does this sheet reference", the way r-node's referencedAssetIds does.
+// The orphan sweep's root set must include these (S3 Part B): the moment a
+// topic stores an image, that blob is invisible to collectChartAssetIds, and
+// an invisible reference is deleted ten minutes later.
+//
+// Walks all four image slots and the gallery cells even though S3 authors
+// only the top slot: this is the single source of truth for the question, and
+// the other slots already exist in the schema waiting for S4. Gallery cells
+// carry raw ids rather than URLs, so no prefix to strip there.
+export function collectSheetAssetIds(sheet: Sheet | undefined | null, into: Set<string> = new Set()): Set<string> {
+  if (!sheet) {
+    return into
+  }
+
+  const visitStyle = (style?: Style) => {
+    if (!style) {
+      return
+    }
+    for (const url of [style.image, style.imageBottom, style.imageLeft, style.imageRight]) {
+      const id = url ? extractAssetId(url) : null
+      if (id) {
+        into.add(id)
+      }
+    }
+    for (const cell of style.gallery?.items ?? []) {
+      if (cell.id) {
+        into.add(cell.id)
+      }
+    }
+  }
+
+  for (const node of Object.values(sheet.nodes)) {
+    visitStyle(node.style)
+  }
+
+  return into
+}
+
 // When each stored blob was written, for every id that has a record. Blobs
 // written before the meta store existed have none and are treated as old.
 async function readAssetWriteTimes(db: IDBDatabase): Promise<Map<string, number>> {
@@ -472,14 +513,20 @@ export async function persistChartAssets(chart: Chart): Promise<Chart> {
     return chart
   }
 
+  // Restore any file-carried mindmaps first (a no-op for every live chart —
+  // see the gate in restoreChartMindmaps), then move the grid images.
+  const chartAfterRestore = await restoreChartMindmaps(chart)
+
+  const target = chartAfterRestore
+
   const [items, coordinates, relatedLayers] = await Promise.all([
-    cloneItems(chart.items, persistChartItemAssets),
-    cloneCoordinates(chart.coordinates, persistChartItemAssets),
-    cloneRelatedLayers(chart.relatedLayers, persistChartItemAssets),
+    cloneItems(target.items, persistChartItemAssets),
+    cloneCoordinates(target.coordinates, persistChartItemAssets),
+    cloneRelatedLayers(target.relatedLayers, persistChartItemAssets),
   ])
 
   return {
-    ...chart,
+    ...target,
     items,
     coordinates,
     ...(relatedLayers ? { relatedLayers } : {}),
@@ -508,7 +555,173 @@ export async function inlineChartAssets(chart: Chart): Promise<Chart> {
 export async function inlineStoredChartAssets(chart: StoredChart): Promise<StoredChart> {
   return {
     ...chart,
-    data: await inlineChartAssets(chart.data),
+    data: await inlineChartMindmaps(await inlineChartAssets(chart.data)),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mindmaps in the save file (S3 Parts A + C.4)
+// ---------------------------------------------------------------------------
+// `Chart.mindmaps` holds sheet ids into the mindmaps IndexedDB database, so
+// until S3 every exported or file-saved chart carried ids that pointed at
+// records which never left the machine — silent live data loss. The rule is
+// exactly the one tile covers follow: out-of-line while live (IndexedDB),
+// inlined in the file, restored under fresh ids on import.
+
+/**
+ * Export side. Reads every sheet named in `chart.mindmaps` and attaches them
+ * as `chart.mindmapSheets`; gathers each carried sheet's image references and
+ * inlines their bytes as `chart.mindmapAssets`, shared by asset id so a
+ * picture used by two maps travels once.
+ *
+ * A mindmaps entry whose sheet is missing from IndexedDB is skipped, not
+ * fatal — and its `mindmaps` entry is dropped with it, so the file never
+ * references a sheet it does not carry. A dangling id is what created the
+ * original bug. Missing image bytes are likewise skipped: the sheet keeps its
+ * reference (it renders as absent, not corrupt) but no bytes are attached.
+ *
+ * Only ever called from inlineStoredChartAssets — the export choke point both
+ * exportCurrentChart and saveChartToFile funnel through. It runs on a clone,
+ * never the live chart.
+ */
+async function inlineChartMindmaps(chart: Chart): Promise<Chart> {
+  if (!chart || typeof chart !== 'object') {
+    return chart
+  }
+
+  const mindmaps = chart.mindmaps
+  if (!mindmaps || Object.keys(mindmaps).length === 0) {
+    return chart
+  }
+
+  const sheets: Record<string, Sheet> = {}
+  const keptMindmaps: Record<string, string> = {}
+  for (const [itemId, sheetId] of Object.entries(mindmaps)) {
+    const sheet = await readSheet(sheetId)
+    // A sheet that cannot be read has nothing to inline; carrying the id
+    // alone would recreate the empty-map-on-another-machine bug.
+    if (!sheet) {
+      continue
+    }
+    sheets[sheetId] = sheet
+    keptMindmaps[itemId] = sheetId
+  }
+
+  const assets: Record<string, string> = {}
+  for (const sheet of Object.values(sheets)) {
+    for (const assetId of collectSheetAssetIds(sheet)) {
+      if (assetId in assets) {
+        continue
+      }
+      const dataUri = await inlineStoredImageUrl(buildLocalAssetUrl(assetId))
+      if (!dataUri) {
+        continue
+      }
+      assets[assetId] = dataUri
+    }
+  }
+
+  return {
+    ...chart,
+    ...(Object.keys(keptMindmaps).length > 0 ? { mindmaps: keptMindmaps } : {}),
+    ...(Object.keys(sheets).length > 0 ? { mindmapSheets: sheets } : {}),
+    ...(Object.keys(assets).length > 0 ? { mindmapAssets: assets } : {}),
+  }
+}
+
+/**
+ * Import side, mirrored against A.3: writes each carried sheet under a
+ * freshly generated id, rewrites `chart.mindmaps` to point at it, restores
+ * each carried image into the asset store under fresh local ids and rewrites
+ * the sheets' Style.image URLs to match, then strips both inline fields so
+ * they never reach localStorage.
+ *
+ * Sheet ids are per-machine IndexedDB keys, not content addresses: importing
+ * the same file twice must produce new ids, or the second import overwrites
+ * the first one's maps and the user loses a map by opening a file.
+ *
+ * GATED on `mindmapSheets`/`mindmapAssets` being present (S3 trap 1): only a
+ * file ever carries them, while persistChartAssets also runs over every live
+ * stored chart at startup — without the gate it would re-key every sheet id
+ * on every launch.
+ */
+async function restoreChartMindmaps(chart: Chart): Promise<Chart> {
+  if (!chart || typeof chart !== 'object') {
+    return chart
+  }
+
+  const carriedSheets = chart.mindmapSheets
+  const carriedAssets = chart.mindmapAssets
+  if (!carriedSheets && !carriedAssets) {
+    return chart
+  }
+
+  // Bytes first, so the sheet rewrite below can point at the fresh ids.
+  // Keyed by the file's asset id → the freshly written local id; several
+  // sheets (and nodes) may share one picture, so each is written once.
+  const idMap = new Map<string, string>()
+  let missingBytes = 0
+  if (carriedAssets) {
+    for (const [assetId, dataUri] of Object.entries(carriedAssets)) {
+      try {
+        const blob = await dataUrlToBlob(dataUri)
+        const freshUrl = await storeLocalImage(blob)
+        const freshId = extractAssetId(freshUrl)
+        if (freshId) {
+          idMap.set(assetId, freshId)
+        }
+        else {
+          missingBytes += 1
+        }
+      }
+      catch {
+        missingBytes += 1
+      }
+    }
+  }
+
+  const remapImage = (style?: Style): Style | undefined => {
+    if (!style || !style.image) {
+      return style
+    }
+    const oldId = extractAssetId(style.image)
+    if (!oldId) {
+      return style
+    }
+    const freshId = idMap.get(oldId)
+    // Bytes that never travelled keep their reference untouched — a dangling
+    // image renders as absent, which beats corrupting the style.
+    return freshId ? { ...style, image: buildLocalAssetUrl(freshId) } : style
+  }
+
+  const nextMindmaps: Record<string, string> = {}
+  if (carriedSheets) {
+    for (const [itemId, oldSheetId] of Object.entries(chart.mindmaps || {})) {
+      const carried = carriedSheets[oldSheetId]
+      // An entry pointing at a sheet the file does not carry stays dropped:
+      // restoring it would put a dangling id back into localStorage.
+      if (!carried) {
+        continue
+      }
+      const freshId = crypto.randomUUID()
+      const clone = structuredClone(carried)
+      clone.sheetId = freshId
+      for (const node of Object.values(clone.nodes)) {
+        node.style = remapImage(node.style) ?? {}
+      }
+      await writeSheet(freshId, clone)
+      nextMindmaps[itemId] = freshId
+    }
+  }
+
+  if (missingBytes > 0) {
+    console.warn(`Imported ${missingBytes} mindmap image(s) whose bytes were missing from the file; their references were left as-is.`)
+  }
+
+  const { mindmapSheets: _sheets, mindmapAssets: _assets, ...rest } = chart
+  return {
+    ...rest,
+    ...(Object.keys(nextMindmaps).length > 0 ? { mindmaps: nextMindmaps } : {}),
   }
 }
 

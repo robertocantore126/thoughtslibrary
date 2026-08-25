@@ -64,3 +64,14 @@ DEFAULT_STYLE.padding is the inspector-facing default, not this render inset.)
 .mindmap-node-title {
     display: block;
 }
+
+/* The TOP image slot (S3 C.1/C.2b). Box-affecting, so it lives here beside the
+   other shared rules: both MindmapNode.vue and the measure layer render this
+   class with an explicit width/height from topicImageBoxStyle. max-width:none
+   overrides any document-wide img cap that would fight the explicit box and
+   make measurement disagree with paint. */
+.mindmap-node-image {
+    max-width: none;
+    border-radius: 6px;
+    pointer-events: none;
+}
